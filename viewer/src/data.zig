@@ -14,6 +14,7 @@ pub const Point = struct {
     cluster: u8,
     is_attractor: bool,
     nearest_attractor: u16,
+    speed: f32 = 0, // physics velocity magnitude (set by physics.applyToPoints)
 };
 
 pub const Keyframe = struct {

@@ -72,7 +72,8 @@ pub fn drawDots(points: []const data.Point, max_total: f32, max_delta: f32, cf: 
         if (p.fade < 0.05) continue;
         const base_r: f32 = 0.04 + (p.total / @max(max_total, 1.0)) * 0.15;
         const delta_boost: f32 = if (max_delta > 0) (p.delta / max_delta) * 0.08 else 0;
-        const radius = (base_r + delta_boost) * p.fade;
+        const speed_boost: f32 = @min(p.speed * 0.02, 0.1);
+        const radius = (base_r + delta_boost + speed_boost) * p.fade;
 
         const cc = constants.PALETTE[p.cluster % constants.NUM_CLUSTERS];
         const alpha: u8 = @intFromFloat(@min(255.0, @max(30.0, 255.0 * p.fade)));
@@ -96,10 +97,11 @@ pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: 
         if (p.fade < 0.1) continue;
         const word = nd.displayWord(p.name_idx);
 
-        const is_labeled = p.is_attractor or (cam.zoom > 40 and p.delta > 5) or (cam.zoom > 80);
+        const is_moving_fast = p.speed > 1.0;
+        const is_labeled = p.is_attractor or is_moving_fast or (cam.zoom > 40 and p.delta > 5) or (cam.zoom > 80);
         if (!is_labeled) continue;
 
-        const font_size: f32 = if (p.is_attractor) 14.0 else 10.0;
+        const font_size: f32 = if (p.is_attractor) 14.0 else if (is_moving_fast) 11.0 else 10.0;
         const screen_pos = rl.getWorldToScreen2D(rl.vec2(p.x, p.y), cam);
 
         const alpha: u8 = @intFromFloat(@min(255.0, 255.0 * p.fade));

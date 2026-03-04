@@ -287,16 +287,15 @@ pub const PhysicsState = struct {
         }
     }
 
-    /// Write simulated positions into a mutable point buffer, blended with rest positions.
+    /// Write simulated positions and velocity into a mutable point buffer, blended with rest positions.
     pub fn applyToPoints(self: *const PhysicsState, points: []data.Point) void {
         const t = smoothstep(self.blend_t);
-        // Build index from name_idx -> physics index
         for (points) |*p| {
-            // Linear scan is fine for ~1300 nodes
             for (0..self.count) |i| {
                 if (self.name_indices[i] == p.name_idx) {
                     p.x = lerp(self.rest_x[i], self.pos_x[i], t);
                     p.y = lerp(self.rest_y[i], self.pos_y[i], t);
+                    p.speed = @sqrt(self.vel_x[i] * self.vel_x[i] + self.vel_y[i] * self.vel_y[i]) * t;
                     break;
                 }
             }
