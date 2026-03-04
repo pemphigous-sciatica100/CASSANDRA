@@ -91,14 +91,16 @@ pub fn drawAttractorRings(points: []const data.Point, cf: *const ui.ClusterFilte
     }
 }
 
-pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, font: rl.Font, cf: *const ui.ClusterFilter) void {
+pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, font: rl.Font, cf: *const ui.ClusterFilter, max_delta: f32) void {
     for (points) |p| {
         if (hidden(cf, p.cluster)) continue;
         if (p.fade < 0.1) continue;
         const word = nd.displayWord(p.name_idx);
 
         const is_moving_fast = p.speed > 1.0;
-        const is_labeled = p.is_attractor or is_moving_fast or (cam.zoom > 40 and p.delta > 5) or (cam.zoom > 80);
+        // Label points with significant relative delta (> 30% of max) so big glows always have names
+        const is_hot = max_delta > 0 and (p.delta / max_delta) > 0.3;
+        const is_labeled = p.is_attractor or is_moving_fast or is_hot or (cam.zoom > 40 and p.delta > 5) or (cam.zoom > 80);
         if (!is_labeled) continue;
 
         const font_size: f32 = if (p.is_attractor) 14.0 else if (is_moving_fast) 11.0 else 10.0;

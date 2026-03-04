@@ -98,6 +98,8 @@ pub fn loadPositions(data: *NucleusData, path: []const u8) !void {
     var it = obj.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
+        // Skip keys already loaded (idempotent reload)
+        if (data.positions.contains(name)) continue;
         const arr = entry.value_ptr.array.items;
         const x: f32 = switch (arr[0]) {
             .float => @floatCast(arr[0].float),

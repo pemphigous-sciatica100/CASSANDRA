@@ -35,6 +35,7 @@ pub const Timeline = struct {
     speed_idx: u8 = 2, // default 0.1x
     num_keyframes: u32 = 0,
     tick_fracs: ?[]f32 = null, // timestamp-proportional positions [0..1]
+    follow_target: ?f32 = null, // live-follow: smoothly drift towards this time
 
     pub fn init(num_kf: u32) Timeline {
         return .{
@@ -43,9 +44,17 @@ pub const Timeline = struct {
         };
     }
 
+    /// Returns true if the playhead is at (or very near) the end of the timeline
+    pub fn wasAtEnd(self: *const Timeline) bool {
+        const max_t: f32 = @floatFromInt(self.num_keyframes -| 1);
+        return self.current_time >= max_t - 0.01;
+    }
+
     /// Compute proportional tick positions from timestamp strings like "20260304_190133"
     pub fn computeTickFracs(self: *Timeline, keyframes: []const data.Keyframe, allocator: std.mem.Allocator) !void {
         if (keyframes.len < 2) return;
+        // Free previous allocation
+        if (self.tick_fracs) |old| allocator.free(old);
         const n = keyframes.len;
         self.tick_fracs = try allocator.alloc(f32, n);
         const fracs = self.tick_fracs.?;
@@ -74,20 +83,36 @@ pub const Timeline = struct {
     }
 
     pub fn update(self: *Timeline, dt: f32) void {
-        if (!self.playing or self.num_keyframes < 2) return;
-        const spd = constants.SPEED_LEVELS[self.speed_idx];
-        self.current_time += spd * dt;
-        const max_t: f32 = @floatFromInt(self.num_keyframes - 1);
-        if (self.current_time >= max_t) {
-            self.current_time = max_t;
-            self.playing = false;
+        const max_t: f32 = @floatFromInt(self.num_keyframes -| 1);
+
+        // Live-follow: smoothly drift towards target (~4s per keyframe)
+        if (self.follow_target) |target| {
+            const drift_speed: f32 = 0.25; // keyframes per second
+            const diff = target - self.current_time;
+            if (@abs(diff) < 0.01) {
+                self.current_time = target;
+                self.follow_target = null;
+            } else {
+                self.current_time += diff * @min(drift_speed * dt * 3.0, 1.0);
+            }
         }
-        if (self.current_time < 0) self.current_time = 0;
+
+        if (self.playing and self.num_keyframes >= 2) {
+            const spd = constants.SPEED_LEVELS[self.speed_idx];
+            self.current_time += spd * dt;
+            if (self.current_time >= max_t) {
+                self.current_time = max_t;
+                self.playing = false;
+            }
+        }
+
+        self.current_time = std.math.clamp(self.current_time, 0, max_t);
     }
 
     pub fn handleInput(self: *Timeline) void {
         if (rl.isKeyPressed(rl.KEY_SPACE)) {
             self.playing = !self.playing;
+            self.follow_target = null;
             const max_t: f32 = @floatFromInt(self.num_keyframes - 1);
             if (self.current_time >= max_t and self.playing) {
                 self.current_time = 0;
@@ -102,10 +127,12 @@ pub const Timeline = struct {
         if (rl.isKeyPressed(rl.KEY_RIGHT)) {
             self.current_time = @min(self.current_time + 1.0, @as(f32, @floatFromInt(self.num_keyframes - 1)));
             self.playing = false;
+            self.follow_target = null;
         }
         if (rl.isKeyPressed(rl.KEY_LEFT)) {
             self.current_time = @max(self.current_time - 1.0, 0.0);
             self.playing = false;
+            self.follow_target = null;
         }
     }
 
@@ -124,6 +151,7 @@ pub const Timeline = struct {
     pub fn seek(self: *Timeline, t: f32) void {
         const max_t: f32 = @floatFromInt(self.num_keyframes - 1);
         self.current_time = std.math.clamp(t, 0, max_t);
+        self.follow_target = null;
     }
 };
 

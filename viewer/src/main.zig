@@ -57,6 +57,12 @@ pub fn main() !void {
     // Stretch x positions to fill widescreen
     const x_scale: f32 = @as(f32, @floatFromInt(constants.WINDOW_W)) / @as(f32, @floatFromInt(constants.WINDOW_H));
 
+    // Track loaded timestamps for live reload detection
+    var loaded_timestamps = std.StringHashMap(void).init(allocator);
+
+    // Running recency — kept alive for incremental keyframe building
+    var running_recency = std.StringHashMap(u32).init(allocator);
+
     std.debug.print("Building keyframes (x_scale={d:.2})...\n", .{x_scale});
     var prev_snap: ?std.StringHashMap(data.SnapshotEntry) = null;
     for (timestamps, 0..) |ts_info, ti| {
@@ -80,9 +86,22 @@ pub fn main() !void {
             ts_info.timestamp, kf.points.len, kf.max_delta,
         });
 
+        // Seed loaded_timestamps
+        try loaded_timestamps.put(ts_info.timestamp, {});
+
         if (prev_snap) |*ps| ps.deinit();
         prev_snap = snapshot;
     }
+
+    // Seed running_recency from the last reconstructed recency
+    if (recencies.len > 0) {
+        var rc_it = recencies[recencies.len - 1].iterator();
+        while (rc_it.next()) |entry| {
+            try running_recency.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
+    // latest_snapshot was only needed for findAttractors — deinit it now
     latest_snapshot.deinit();
 
     std.debug.print("Ready! {d} keyframes, {d} names\n", .{
@@ -110,9 +129,43 @@ pub fn main() !void {
     var phys = physics.PhysicsState.init(allocator);
     var phys_buf: ?[]data.Point = null;
     var prev_ki: u32 = std.math.maxInt(u32);
+    var scan_timer: f32 = 0;
+
+    // Background loader state
+    var loader = BgLoader.init(allocator);
 
     while (!rl.windowShouldClose()) {
         const dt = rl.getFrameTime();
+
+        // --- Live reload (threaded) ---
+        scan_timer += dt;
+        // Check if background load completed
+        if (loader.tryGetResult()) |result| {
+            const was_at_end = tl.wasAtEnd();
+            // Parse + build keyframe on main thread (data is already in RAM)
+            integrateLoadResult(
+                allocator,
+                &nd,
+                &loaded_timestamps,
+                &running_recency,
+                &prev_snap,
+                attractor_synsets,
+                attractor_labels,
+                x_scale,
+                result,
+            ) catch {};
+            tl.num_keyframes = @intCast(nd.keyframes.items.len);
+            tl.computeTickFracs(nd.keyframes.items, allocator) catch {};
+            if (was_at_end) {
+                tl.follow_target = @floatFromInt(tl.num_keyframes - 1);
+            }
+            scan_timer = 0; // reset so we don't immediately re-scan
+        }
+        // Kick off a new background scan every 2s if not already loading
+        if (scan_timer >= 2.0 and !loader.isBusy()) {
+            scan_timer = 0;
+            loader.startScan(&loaded_timestamps);
+        }
 
         // Input
         if (rl.isKeyPressed(rl.KEY_F11) or rl.isKeyPressed(rl.KEY_F)) {
@@ -209,7 +262,7 @@ pub fn main() !void {
         rl.endMode2D();
 
         // Screen-space
-        render.drawLabels(render_points, &nd, cam_state.cam, font, &cluster_filter);
+        render.drawLabels(render_points, &nd, cam_state.cam, font, &cluster_filter, cur_kf.max_delta);
         render.drawVignette(sw, sh);
 
         ui.drawHUD(font, cur_kf.timestamp, cur_kf.num_visible, cur_kf.num_hot, @intCast(keyframes.len), &tl, phys.isActive());
@@ -224,4 +277,331 @@ pub fn main() !void {
         rl.drawFPS(sw - 90, sh - 60);
         rl.endDrawing();
     }
+}
+
+/// Result produced by background loader thread — raw file bytes, no parsing.
+const LoadResult = struct {
+    timestamp: [20]u8,
+    ts_len: u8,
+    snap_bytes: []u8,
+    delta_bytes: []u8,
+    pos_bytes: ?[]u8,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *LoadResult) void {
+        self.allocator.free(self.snap_bytes);
+        self.allocator.free(self.delta_bytes);
+        if (self.pos_bytes) |b| self.allocator.free(b);
+    }
+};
+
+/// Background file loader — does dir scan + file reads on a separate thread.
+const BgLoader = struct {
+    allocator: std.mem.Allocator,
+    result: ?LoadResult = null,
+    busy: bool = false,
+    thread: ?std.Thread = null,
+    // Snapshot of loaded timestamps passed to thread (keys are stable arena strings)
+    known_ts: ?std.StringHashMap(void) = null,
+
+    fn init(alloc: std.mem.Allocator) BgLoader {
+        return .{ .allocator = alloc };
+    }
+
+    fn isBusy(self: *BgLoader) bool {
+        return self.busy;
+    }
+
+    fn tryGetResult(self: *BgLoader) ?LoadResult {
+        if (self.busy) return null;
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+        }
+        if (self.result) |r| {
+            self.result = null;
+            if (self.known_ts) |*kt| {
+                kt.deinit();
+                self.known_ts = null;
+            }
+            return r;
+        }
+        return null;
+    }
+
+    fn startScan(self: *BgLoader, loaded_timestamps: *std.StringHashMap(void)) void {
+        if (self.busy) return;
+        // Clone the set of known timestamps (keys point to arena — stable)
+        var clone = std.StringHashMap(void).init(self.allocator);
+        var it = loaded_timestamps.iterator();
+        while (it.next()) |entry| {
+            clone.put(entry.key_ptr.*, {}) catch {};
+        }
+        self.known_ts = clone;
+        self.busy = true;
+        self.thread = std.Thread.spawn(.{}, bgWorker, .{self}) catch {
+            self.busy = false;
+            if (self.known_ts) |*kt| {
+                kt.deinit();
+                self.known_ts = null;
+            }
+            return;
+        };
+    }
+
+    fn bgWorker(self: *BgLoader) void {
+        defer self.busy = false;
+        self.result = doLoad(self.allocator, &self.known_ts.?) catch null;
+    }
+
+    fn doLoad(alloc: std.mem.Allocator, known: *std.StringHashMap(void)) !LoadResult {
+        // Scan directory for first unknown snapshot
+        var dir = try std.fs.cwd().openDir("../snapshots", .{ .iterate = true });
+        defer dir.close();
+
+        // Collect unknown timestamps, find earliest
+        var best_ts: ?[20]u8 = null;
+        var best_len: u8 = 0;
+
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file) continue;
+            const name = entry.name;
+            if (name.len >= 5 and std.mem.eql(u8, name[0..5], "snap_") and std.mem.endsWith(u8, name, ".json")) {
+                const ts = name[5 .. name.len - 5];
+                if (ts.len > 20) continue;
+                if (!known.contains(ts)) {
+                    if (best_ts == null or std.mem.order(u8, ts, best_ts.?[0..best_len]) == .lt) {
+                        var buf: [20]u8 = undefined;
+                        @memcpy(buf[0..ts.len], ts);
+                        best_ts = buf;
+                        best_len = @intCast(ts.len);
+                    }
+                }
+            }
+        }
+
+        const ts_buf = best_ts orelse return error.NoNewSnapshots;
+        const ts = ts_buf[0..best_len];
+
+        // Read files
+        const snap_path = try std.fmt.allocPrint(alloc, "../snapshots/snap_{s}.json", .{ts});
+        defer alloc.free(snap_path);
+        const delta_path = try std.fmt.allocPrint(alloc, "../snapshots/delta_{s}.json", .{ts});
+        defer alloc.free(delta_path);
+
+        const snap_bytes = readFileAlloc(alloc, snap_path) catch return error.ReadFailed;
+        const delta_bytes = readFileAlloc(alloc, delta_path) catch {
+            alloc.free(snap_bytes);
+            return error.ReadFailed;
+        };
+        const pos_bytes = readFileAlloc(alloc, "../nucleus_positions.json") catch null;
+
+        var result: LoadResult = .{
+            .timestamp = ts_buf,
+            .ts_len = best_len,
+            .snap_bytes = snap_bytes,
+            .delta_bytes = delta_bytes,
+            .pos_bytes = pos_bytes,
+            .allocator = alloc,
+        };
+        _ = &result;
+        return result;
+    }
+
+    fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        return try file.readToEndAlloc(alloc, 50 * 1024 * 1024);
+    }
+};
+
+/// Parse pre-loaded bytes and integrate into the live viewer state.
+/// All JSON parsing happens here on the main thread, but from RAM — no disk I/O.
+fn integrateLoadResult(
+    allocator: std.mem.Allocator,
+    nd: *data.NucleusData,
+    loaded_timestamps: *std.StringHashMap(void),
+    running_recency: *std.StringHashMap(u32),
+    prev_snap: *?std.StringHashMap(data.SnapshotEntry),
+    attractor_synsets: []const []const u8,
+    attractor_labels: []const u8,
+    x_scale: f32,
+    raw: LoadResult,
+) !void {
+    var result = raw;
+    defer result.deinit();
+
+    const ts = result.timestamp[0..result.ts_len];
+
+    // Reload positions from pre-read bytes
+    if (result.pos_bytes) |pos_bytes| {
+        parsePositionsFromBytes(nd, pos_bytes) catch {};
+    }
+
+    // Parse snapshot from bytes
+    var snapshot = parseSnapshotFromBytes(nd, result.snap_bytes) catch return;
+    var delta_map = parseDeltaFromBytes(nd, result.delta_bytes) catch std.StringHashMap(i64).init(allocator);
+
+    // Update running_recency
+    var age_it = running_recency.iterator();
+    while (age_it.next()) |entry| {
+        entry.value_ptr.* += 1;
+    }
+    var delta_it = delta_map.iterator();
+    while (delta_it.next()) |d_entry| {
+        const arena = nd.string_arena.allocator();
+        const key = arena.dupe(u8, d_entry.key_ptr.*) catch continue;
+        running_recency.put(key, 0) catch {};
+    }
+    const evict_threshold: u32 = @intFromFloat(constants.FADE_WINDOW * 2);
+    {
+        var remove_list = std.ArrayList([]const u8).init(allocator);
+        defer remove_list.deinit();
+        var rm_it = running_recency.iterator();
+        while (rm_it.next()) |entry| {
+            if (entry.value_ptr.* > evict_threshold) {
+                remove_list.append(entry.key_ptr.*) catch {};
+            }
+        }
+        for (remove_list.items) |key| {
+            _ = running_recency.remove(key);
+        }
+    }
+
+    // Copy timestamp to arena
+    const arena = nd.string_arena.allocator();
+    const ts_copy = try arena.dupe(u8, ts);
+
+    const kf = try data.buildKeyframe(
+        nd,
+        &snapshot,
+        &delta_map,
+        running_recency,
+        if (prev_snap.*) |*ps| ps else null,
+        attractor_synsets,
+        attractor_labels,
+        ts_copy,
+        x_scale,
+    );
+    try nd.keyframes.append(kf);
+
+    if (prev_snap.*) |*ps| ps.deinit();
+    prev_snap.* = snapshot;
+
+    try loaded_timestamps.put(ts_copy, {});
+    std.debug.print("Live: loaded {s} ({d} points)\n", .{ ts, kf.points.len });
+}
+
+/// Parse positions JSON from in-memory bytes (idempotent — skips existing keys)
+fn parsePositionsFromBytes(nd: *data.NucleusData, bytes: []const u8) !void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, nd.allocator, bytes, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (nd.positions.contains(name)) continue;
+        const arr = entry.value_ptr.array.items;
+        const x: f32 = switch (arr[0]) {
+            .float => @floatCast(arr[0].float),
+            .integer => @floatFromInt(arr[0].integer),
+            else => 0.0,
+        };
+        const y: f32 = switch (arr[1]) {
+            .float => @floatCast(arr[1].float),
+            .integer => @floatFromInt(arr[1].integer),
+            else => 0.0,
+        };
+        const arena = nd.string_arena.allocator();
+        const name_copy = try arena.dupe(u8, name);
+        try nd.positions.put(name_copy, .{ x, y });
+    }
+}
+
+/// Parse snapshot JSON from in-memory bytes
+fn parseSnapshotFromBytes(nd: *data.NucleusData, bytes: []const u8) !std.StringHashMap(data.SnapshotEntry) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, nd.allocator, bytes, .{});
+    defer parsed.deinit();
+
+    var result = std.StringHashMap(data.SnapshotEntry).init(nd.allocator);
+    const obj = parsed.value.object;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const val = entry.value_ptr.object;
+
+        const word_val = val.get("word") orelse continue;
+        const word = switch (word_val) {
+            .string => |s| s,
+            else => continue,
+        };
+        const uc_val = val.get("update_count") orelse continue;
+        const uc: i64 = switch (uc_val) {
+            .integer => uc_val.integer,
+            else => 0,
+        };
+        const ec_val = val.get("exemplar_count") orelse continue;
+        const ec: i64 = switch (ec_val) {
+            .integer => ec_val.integer,
+            else => 0,
+        };
+        const unc_val = val.get("uncertainty") orelse continue;
+        const unc: f64 = switch (unc_val) {
+            .float => unc_val.float,
+            .integer => @floatFromInt(unc_val.integer),
+            else => 0.0,
+        };
+
+        if (val.get("anchor")) |anc_val| {
+            if (anc_val == .array) {
+                const items = anc_val.array.items;
+                var anchor_f32: [constants.ANCHOR_DIM]f32 = undefined;
+                for (0..@min(constants.ANCHOR_DIM, items.len)) |i| {
+                    anchor_f32[i] = switch (items[i]) {
+                        .float => @floatCast(items[i].float),
+                        .integer => @floatFromInt(items[i].integer),
+                        else => 0.0,
+                    };
+                }
+                const arena = nd.string_arena.allocator();
+                const akey = try arena.dupe(u8, name);
+                try nd.anchors.put(akey, anchor_f32);
+            }
+        }
+
+        const arena = nd.string_arena.allocator();
+        const name_copy = try arena.dupe(u8, name);
+        const word_copy = try arena.dupe(u8, word);
+        _ = try nd.getOrAddName(name_copy, word_copy);
+
+        try result.put(name_copy, .{
+            .word = word_copy,
+            .update_count = uc,
+            .exemplar_count = ec,
+            .uncertainty = unc,
+            .anchor = undefined,
+        });
+    }
+    return result;
+}
+
+/// Parse delta JSON from in-memory bytes
+fn parseDeltaFromBytes(nd: *data.NucleusData, bytes: []const u8) !std.StringHashMap(i64) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, nd.allocator, bytes, .{});
+    defer parsed.deinit();
+
+    var result = std.StringHashMap(i64).init(nd.allocator);
+    const obj = parsed.value.object;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const arena = nd.string_arena.allocator();
+        const name_copy = try arena.dupe(u8, entry.key_ptr.*);
+        const v: i64 = switch (entry.value_ptr.*) {
+            .integer => entry.value_ptr.integer,
+            else => 0,
+        };
+        try result.put(name_copy, v);
+    }
+    return result;
 }
