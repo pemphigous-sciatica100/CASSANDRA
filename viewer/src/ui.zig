@@ -69,6 +69,7 @@ pub fn drawHUD(
     num_hot: u32,
     num_keyframes: u32,
     tl: *const timeline_mod.Timeline,
+    physics_active: bool,
 ) void {
     const x: f32 = 20;
     var y: f32 = 20;
@@ -102,6 +103,11 @@ pub fn drawHUD(
 
     _ = printZ(&buf, "SPEED: {d:.1}x", .{tl.speed()});
     rl.drawTextEx(font, @ptrCast(&buf), rl.vec2(x, y), size, 1.0, constants.HUD_DIM);
+    y += size + 2;
+
+    if (physics_active) {
+        rl.drawTextEx(font, "PHYSICS", rl.vec2(x, y), size, 1.0, constants.PHYSICS_COLOR);
+    }
 }
 
 pub fn drawScrubber(tl: *timeline_mod.Timeline, font: rl.Font, sw: c_int, sh: c_int) void {

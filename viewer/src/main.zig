@@ -6,6 +6,7 @@ const camera = @import("camera.zig");
 const timeline_mod = @import("timeline.zig");
 const ui = @import("ui.zig");
 const constants = @import("constants.zig");
+const physics = @import("physics.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -105,6 +106,9 @@ pub fn main() !void {
     var cluster_filter = ui.ClusterFilter{};
 
     var interp_buf: ?[]data.Point = null;
+    var phys = physics.PhysicsState.init(allocator);
+    var phys_buf: ?[]data.Point = null;
+    var prev_ki: u32 = std.math.maxInt(u32);
 
     while (!rl.windowShouldClose()) {
         const dt = rl.getFrameTime();
@@ -119,6 +123,9 @@ pub fn main() !void {
             search.handleInput();
             tl.handleInput();
             cluster_filter.handleInput();
+            if (rl.isKeyPressed(rl.KEY_G)) {
+                phys.toggle();
+            }
         }
         tl.update(dt);
 
@@ -143,9 +150,42 @@ pub fn main() !void {
         };
 
         const cur_kf = keyframes[ki];
+
+        // --- Physics integration ---
+        if (phys.isActive()) {
+            // Re-sync when keyframe changes or on every frame to track interpolated activity
+            if (ki != prev_ki) {
+                try phys.syncToPoints(current_points, cur_kf.max_delta);
+                prev_ki = ki;
+            } else {
+                // Update activity values from interpolated points each frame
+                const md = @max(cur_kf.max_delta, 1.0);
+                for (current_points, 0..) |p, idx| {
+                    if (idx < phys.count and phys.name_indices[idx] == p.name_idx) {
+                        phys.activity[idx] = p.delta / md;
+                    }
+                }
+            }
+            phys.step(dt);
+            phys.updateBlend(dt);
+
+            // Copy points into mutable buffer and apply physics positions
+            if (phys_buf) |buf| allocator.free(buf);
+            phys_buf = try allocator.alloc(data.Point, current_points.len);
+            @memcpy(phys_buf.?, current_points);
+            phys.applyToPoints(phys_buf.?);
+        } else {
+            phys.updateBlend(dt); // finish blending_out transition
+        }
+
+        const render_points: []const data.Point = if (phys.isActive())
+            phys_buf.?
+        else
+            current_points;
+
         const sw = rl.getScreenWidth();
         const sh = rl.getScreenHeight();
-        cam_state.update(current_points, sw, sh);
+        cam_state.update(render_points, sw, sh);
 
         // --- Drawing ---
         rl.beginDrawing();
@@ -154,30 +194,30 @@ pub fn main() !void {
         // World-space (through Camera2D)
         rl.beginMode2D(cam_state.cam);
         render.drawGrid(cam_state.cam, sw, sh);
-        render.drawConnectionLines(current_points, &nd, &cluster_filter);
-        render.drawGlow(current_points, cur_kf.max_delta, &cluster_filter);
-        render.drawDots(current_points, cur_kf.max_total, cur_kf.max_delta, &cluster_filter);
-        render.drawAttractorRings(current_points, &cluster_filter);
-        render.drawUncertaintyArrows(current_points, &cluster_filter);
+        render.drawConnectionLines(render_points, &nd, &cluster_filter);
+        render.drawGlow(render_points, cur_kf.max_delta, &cluster_filter);
+        render.drawDots(render_points, cur_kf.max_total, cur_kf.max_delta, &cluster_filter);
+        render.drawAttractorRings(render_points, &cluster_filter);
+        render.drawUncertaintyArrows(render_points, &cluster_filter);
         if (cam_state.selected_point) |sel| {
-            render.drawHighlight(current_points, sel);
+            render.drawHighlight(render_points, sel);
         }
         if (search.len > 0) {
-            render.drawSearchHighlights(current_points, &nd, search.query());
+            render.drawSearchHighlights(render_points, &nd, search.query());
         }
         rl.endMode2D();
 
         // Screen-space
-        render.drawLabels(current_points, &nd, cam_state.cam, font, &cluster_filter);
+        render.drawLabels(render_points, &nd, cam_state.cam, font, &cluster_filter);
         render.drawVignette(sw, sh);
 
-        ui.drawHUD(font, cur_kf.timestamp, cur_kf.num_visible, cur_kf.num_hot, @intCast(keyframes.len), &tl);
+        ui.drawHUD(font, cur_kf.timestamp, cur_kf.num_visible, cur_kf.num_hot, @intCast(keyframes.len), &tl, phys.isActive());
         ui.drawScrubber(&tl, font, sw, sh);
         ui.drawClusterFilter(&cluster_filter, sw);
         ui.drawSearchBar(&search, font, sw);
 
         if (cam_state.selected_point) |sel| {
-            ui.drawDetailPanel(current_points, sel, &nd, font, sw);
+            ui.drawDetailPanel(render_points, sel, &nd, font, sw);
         }
 
         rl.drawFPS(sw - 90, sh - 60);
