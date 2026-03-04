@@ -11,10 +11,11 @@ pub const PhysicsMode = enum {
 pub const Constants = struct {
     anchor_k_cold: f32 = 8.0,
     anchor_k_hot: f32 = 0.05,
-    anchor_power: f32 = 3.0, // cubic falloff: cold*(1-act)^3 so mid-activity nodes loosen fast
-    center_gravity: f32 = 3.0, // spring-to-origin: force = k * dist * activity
-    velocity_freeze: f32 = 0.01, // zero velocity below this speed
+    anchor_power: f32 = 4.0, // quartic falloff: mid-activity nodes loosen even faster
+    center_gravity: f32 = 8.0, // spring-to-origin: force = k * dist * activity
+    velocity_freeze: f32 = 0.1, // zero velocity below this speed
     repulsion_strength: f32 = 0.08,
+    repulsion_activity_boost: f32 = 80.0, // hot-hot pairs repel harder (product scaling)
     repulsion_cutoff: f32 = 4.0,
     repulsion_min_dist: f32 = 0.3,
     repulsion_activity_threshold: f32 = 0.01, // skip pairs where both below this
@@ -179,9 +180,10 @@ pub const PhysicsState = struct {
             var fy: f32 = 0;
             const act = self.activity[i];
 
-            // 1. Anchor spring: cubic falloff so mid-activity nodes loosen fast
+            // 1. Anchor spring: quartic falloff so mid-activity nodes loosen fast
             const inv_act = 1.0 - act;
-            const inv_act3 = inv_act * inv_act * inv_act; // (1-act)^3
+            const inv_act2 = inv_act * inv_act;
+            const inv_act3 = inv_act2 * inv_act2; // (1-act)^4
             const k = c.anchor_k_hot + (c.anchor_k_cold - c.anchor_k_hot) * inv_act3;
             fx += (self.rest_x[i] - self.pos_x[i]) * k;
             fy += (self.rest_y[i] - self.pos_y[i]) * k;
@@ -215,8 +217,38 @@ pub const PhysicsState = struct {
             const damp = 1.0 - c.damping;
             self.vel_x[i] *= damp;
             self.vel_y[i] *= damp;
+        }
 
-            // Velocity clamp
+        // 4. Repulsion pass — activity-weighted, skip cold-cold pairs
+        const cutoff2 = c.repulsion_cutoff * c.repulsion_cutoff;
+        const thresh = c.repulsion_activity_threshold;
+        for (0..n) |i| {
+            const act_i = self.activity[i];
+            const is_cold = act_i < thresh;
+            for (i + 1..n) |j| {
+                const act_j = self.activity[j];
+                // Skip cold-cold pairs
+                if (is_cold and act_j < thresh) continue;
+                const dx = self.pos_x[j] - self.pos_x[i];
+                const dy = self.pos_y[j] - self.pos_y[i];
+                const d2 = dx * dx + dy * dy;
+                if (d2 > cutoff2) continue;
+                const dist = @max(@sqrt(d2), c.repulsion_min_dist);
+                // Scale repulsion by activity product: hot-hot pairs repel hard,
+                // hot-cold stays at baseline so attractors push through the cloud
+                const activity_scale = 1.0 + c.repulsion_activity_boost * act_i * act_j;
+                const force = c.repulsion_strength * activity_scale / (dist * dist);
+                const nx = dx / dist;
+                const ny = dy / dist;
+                self.vel_x[i] -= nx * force;
+                self.vel_y[i] -= ny * force;
+                self.vel_x[j] += nx * force;
+                self.vel_y[j] += ny * force;
+            }
+        }
+
+        // 5. Final pass: freeze, clamp, integrate position
+        for (0..n) |i| {
             const spd = @sqrt(self.vel_x[i] * self.vel_x[i] + self.vel_y[i] * self.vel_y[i]);
             if (spd < c.velocity_freeze) {
                 self.vel_x[i] = 0;
@@ -226,50 +258,8 @@ pub const PhysicsState = struct {
                 self.vel_x[i] *= scale;
                 self.vel_y[i] *= scale;
             }
-
             self.pos_x[i] += self.vel_x[i] * dt;
             self.pos_y[i] += self.vel_y[i] * dt;
-        }
-
-        // 4. Repulsion pass — skip pairs where both nodes are cold
-        const cutoff2 = c.repulsion_cutoff * c.repulsion_cutoff;
-        const thresh = c.repulsion_activity_threshold;
-        for (0..n) |i| {
-            const ai = self.activity[i];
-            if (ai < thresh) {
-                // Cold node: only check against hot nodes (j where activity >= thresh)
-                for (i + 1..n) |j| {
-                    if (self.activity[j] < thresh) continue;
-                    const dx = self.pos_x[j] - self.pos_x[i];
-                    const dy = self.pos_y[j] - self.pos_y[i];
-                    const d2 = dx * dx + dy * dy;
-                    if (d2 > cutoff2) continue;
-                    const dist = @max(@sqrt(d2), c.repulsion_min_dist);
-                    const force = c.repulsion_strength / (dist * dist);
-                    const nx = dx / dist;
-                    const ny = dy / dist;
-                    self.vel_x[i] -= nx * force;
-                    self.vel_y[i] -= ny * force;
-                    self.vel_x[j] += nx * force;
-                    self.vel_y[j] += ny * force;
-                }
-            } else {
-                // Hot node: check against all
-                for (i + 1..n) |j| {
-                    const dx = self.pos_x[j] - self.pos_x[i];
-                    const dy = self.pos_y[j] - self.pos_y[i];
-                    const d2 = dx * dx + dy * dy;
-                    if (d2 > cutoff2) continue;
-                    const dist = @max(@sqrt(d2), c.repulsion_min_dist);
-                    const force = c.repulsion_strength / (dist * dist);
-                    const nx = dx / dist;
-                    const ny = dy / dist;
-                    self.vel_x[i] -= nx * force;
-                    self.vel_y[i] -= ny * force;
-                    self.vel_x[j] += nx * force;
-                    self.vel_y[j] += ny * force;
-                }
-            }
         }
     }
 
