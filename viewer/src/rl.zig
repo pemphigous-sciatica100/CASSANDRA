@@ -50,13 +50,19 @@ pub fn getFrameTime() f32 {
     return c.GetFrameTime();
 }
 pub fn toggleFullscreen() void {
-    c.ToggleFullscreen();
+    c.ToggleBorderlessWindowed();
 }
 pub fn getScreenWidth() c_int {
     return c.GetScreenWidth();
 }
 pub fn getScreenHeight() c_int {
     return c.GetScreenHeight();
+}
+pub fn getMonitorWidth(monitor: c_int) c_int {
+    return c.GetMonitorWidth(monitor);
+}
+pub fn getMonitorHeight(monitor: c_int) c_int {
+    return c.GetMonitorHeight(monitor);
 }
 
 pub const FLAG_MSAA_4X_HINT = c.FLAG_MSAA_4X_HINT;

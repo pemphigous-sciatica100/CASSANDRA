@@ -144,30 +144,8 @@ pub fn drawUncertaintyArrows(points: []const data.Point, cf: *const ui.ClusterFi
 }
 
 pub fn drawVignette(sw: c_int, sh: c_int) void {
-    const w: f32 = @floatFromInt(sw);
-    const h: f32 = @floatFromInt(sh);
-    const band: f32 = 120;
-
-    var i: f32 = 0;
-    while (i < band) : (i += 2) {
-        const a: u8 = @intFromFloat(160.0 * (1.0 - i / band));
-        rl.drawRectangle(0, @intFromFloat(i), sw, 2, rl.color(0, 0, 0, a));
-    }
-    i = 0;
-    while (i < band) : (i += 2) {
-        const a: u8 = @intFromFloat(160.0 * (1.0 - i / band));
-        rl.drawRectangle(0, @intFromFloat(h - band + i), sw, 2, rl.color(0, 0, 0, a));
-    }
-    i = 0;
-    while (i < band) : (i += 2) {
-        const a: u8 = @intFromFloat(120.0 * (1.0 - i / band));
-        rl.drawRectangle(@intFromFloat(i), 0, 2, sh, rl.color(0, 0, 0, a));
-    }
-    i = 0;
-    while (i < band) : (i += 2) {
-        const a: u8 = @intFromFloat(120.0 * (1.0 - i / band));
-        rl.drawRectangle(@intFromFloat(w - band + i), 0, 2, sh, rl.color(0, 0, 0, a));
-    }
+    _ = sw;
+    _ = sh;
 }
 
 pub fn drawHighlight(points: []const data.Point, idx: u16) void {
