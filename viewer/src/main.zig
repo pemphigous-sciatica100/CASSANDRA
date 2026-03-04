@@ -154,6 +154,16 @@ pub fn main() !void {
                 x_scale,
                 result,
             ) catch {};
+            // Drop oldest keyframes if over the cap
+            while (nd.keyframes.items.len > constants.MAX_KEYFRAMES) {
+                const old_kf = nd.keyframes.orderedRemove(0);
+                allocator.free(old_kf.points);
+                // Shift timeline back so the user stays on the same keyframe
+                tl.current_time = @max(tl.current_time - 1.0, 0.0);
+                if (tl.follow_target) |ft| {
+                    tl.follow_target = @max(ft - 1.0, 0.0);
+                }
+            }
             tl.num_keyframes = @intCast(nd.keyframes.items.len);
             tl.computeTickFracs(nd.keyframes.items, allocator) catch {};
             if (was_at_end) {

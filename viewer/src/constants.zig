@@ -32,3 +32,6 @@ pub const PALETTE = [8]rl.Color{
 };
 
 pub const SPEED_LEVELS = [_]f32{ 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0 };
+
+/// Maximum keyframes kept in viewer memory. Oldest are dropped as new ones arrive.
+pub const MAX_KEYFRAMES: u32 = 100;
