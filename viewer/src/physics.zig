@@ -12,7 +12,7 @@ pub const Constants = struct {
     anchor_k_cold: f32 = 8.0,
     anchor_k_hot: f32 = 0.05,
     anchor_power: f32 = 4.0, // quartic falloff: mid-activity nodes loosen even faster
-    center_gravity: f32 = 8.0, // spring-to-origin: force = k * dist * activity
+    center_gravity: f32 = 16.0, // spring-to-origin: force = k * dist * activity
     velocity_freeze: f32 = 0.1, // zero velocity below this speed
     repulsion_strength: f32 = 0.08,
     repulsion_activity_boost: f32 = 80.0, // hot-hot pairs repel harder (product scaling)
@@ -23,6 +23,7 @@ pub const Constants = struct {
     attractor_spring_k: f32 = 1.5,
     attractor_spring_rest_len: f32 = 2.0,
     max_velocity: f32 = 20.0,
+    time_scale: f32 = 0.25, // slow-mo: simulation runs at 1/4 real time
     blend_duration: f32 = 1.5,
 };
 
@@ -158,9 +159,10 @@ pub const PhysicsState = struct {
     }
 
     /// Run one physics step: accumulate forces, integrate, damp.
-    pub fn step(self: *PhysicsState, dt: f32) void {
+    pub fn step(self: *PhysicsState, raw_dt: f32) void {
         if (self.count == 0) return;
         const c = self.consts;
+        const dt = raw_dt * c.time_scale;
         const n = self.count;
 
         // Find attractor positions (in physics space)
