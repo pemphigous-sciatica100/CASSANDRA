@@ -53,7 +53,10 @@ pub fn main() !void {
     const recencies = try data.reconstructRecency(timestamps, &nd);
 
     // Build keyframes
-    std.debug.print("Building keyframes...\n", .{});
+    // Stretch x positions to fill widescreen
+    const x_scale: f32 = @as(f32, @floatFromInt(constants.WINDOW_W)) / @as(f32, @floatFromInt(constants.WINDOW_H));
+
+    std.debug.print("Building keyframes (x_scale={d:.2})...\n", .{x_scale});
     var prev_snap: ?std.StringHashMap(data.SnapshotEntry) = null;
     for (timestamps, 0..) |ts_info, ti| {
         var snapshot = try data.loadSnapshot(&nd, ts_info.snap_path);
@@ -68,6 +71,7 @@ pub fn main() !void {
             attractor_synsets,
             attractor_labels,
             ts_info.timestamp,
+            x_scale,
         );
         try nd.keyframes.append(kf);
 

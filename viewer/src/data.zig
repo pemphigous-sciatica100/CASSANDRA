@@ -401,6 +401,7 @@ pub fn buildKeyframe(
     attractor_synsets: []const []const u8,
     attractor_labels: []const u8,
     timestamp: []const u8,
+    x_scale: f32,
 ) !Keyframe {
     var points = std.ArrayList(Point).init(nd.allocator);
     var max_delta: f32 = 1;
@@ -452,7 +453,7 @@ pub fn buildKeyframe(
 
         try points.append(.{
             .name_idx = name_idx,
-            .x = pos[0],
+            .x = pos[0] * x_scale,
             .y = pos[1],
             .total = total,
             .exemplars = @floatFromInt(snap_entry.exemplar_count),
