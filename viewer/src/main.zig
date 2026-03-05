@@ -52,7 +52,8 @@ pub fn main() !void {
     var nav_num_paths: usize = 0;
     var nav_version: usize = 0;
     var navmesh_focus: ?u16 = null; // name_idx of focused attractor (null = show all)
-    var nav_attractor_hash: u64 = 0; // hash of attractor set paths were built for
+    var nav_attractor_hash: u64 = 0; // hash of attractor set whose paths we currently have
+    var nav_requested_hash: u64 = 0; // hash of attractor set we last requested from worker
 
     var interp_buf: ?[]data.Point = null;
     var phys = physics.PhysicsState.init(allocator);
@@ -148,18 +149,8 @@ pub fn main() !void {
             for (paths, 0..) |p, i| {
                 nav_paths[i] = p;
             }
-            // Record hash of the attractor set these paths were built for
-            {
-                var sorted_att: [constants.NUM_ATTRACTORS]u16 = undefined;
-                const n = nd.num_attractors;
-                @memcpy(sorted_att[0..n], nd.attractor_names[0..n]);
-                std.mem.sort(u16, sorted_att[0..n], {}, struct {
-                    fn cmp(_: void, a: u16, b: u16) bool {
-                        return a < b;
-                    }
-                }.cmp);
-                nav_attractor_hash = hashAttractors(sorted_att[0..n]);
-            }
+            // Mark that the paths we have now match what we last requested
+            nav_attractor_hash = nav_requested_hash;
         }
 
         // Fit camera when first data arrives
@@ -336,34 +327,10 @@ pub fn main() !void {
                     att_clusters[i] = ap.cluster;
                 }
                 const cur_hash = hashAttractors(att_buf[0..n_att]);
-                if (cur_hash != nav_attractor_hash) {
-                    nav_attractor_hash = cur_hash;
-                    // Grab shared graph from queue
-                    queue.mutex.lock();
-                    const g_adj = queue.nav_adj;
-                    const g_adj_len = queue.nav_adj_len;
-                    const g_l2n = queue.nav_local_to_name;
-                    const g_n2l = queue.nav_name_to_local;
-                    queue.mutex.unlock();
-
-                    if (g_adj != null and g_adj_len != null and g_l2n != null and g_n2l != null) {
-                        const path_result = navmesh.computePaths(
-                            g_adj.?,
-                            g_adj_len.?,
-                            g_l2n.?,
-                            g_n2l.?,
-                            att_buf[0..n_att],
-                            att_clusters[0..n_att],
-                            allocator,
-                        ) catch null;
-                        if (path_result) |pr| {
-                            nav_num_paths = pr.num_paths;
-                            for (pr.paths[0..pr.num_paths], 0..) |p, i| {
-                                nav_paths[i] = p;
-                            }
-                            std.debug.print("Main: recomputed {d} navmesh paths for {d} attractors\n", .{ nav_num_paths, n_att });
-                        }
-                    }
+                if (cur_hash != nav_attractor_hash and cur_hash != nav_requested_hash) {
+                    nav_requested_hash = cur_hash;
+                    // Request async navmesh recomputation from worker thread
+                    queue.requestNavPaths(att_buf[0..n_att], att_clusters[0..n_att]);
                 }
             }
         }

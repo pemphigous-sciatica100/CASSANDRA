@@ -51,6 +51,12 @@ pub const LiveQueue = struct {
     nav_local_to_name: ?[]u16 = null,
     nav_name_to_local: ?[]u16 = null,
 
+    // Nav request: main thread posts attractor indices here, worker picks them up
+    nav_request_attractors: [constants.NUM_ATTRACTORS]u16 = undefined,
+    nav_request_clusters: [constants.NUM_ATTRACTORS]u8 = undefined,
+    nav_request_len: usize = 0,
+    nav_request_pending: bool = false,
+
     pub fn pop(self: *LiveQueue) ?*ReadyKeyframe {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -73,6 +79,19 @@ pub const LiveQueue = struct {
         self.nav_paths = paths;
         self.nav_num_paths = num;
         self.nav_version += 1;
+    }
+
+    /// Main thread requests navmesh recomputation for a new attractor set.
+    pub fn requestNavPaths(self: *LiveQueue, attractors: []const u16, clusters: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const n = @min(attractors.len, constants.NUM_ATTRACTORS);
+        for (0..n) |i| {
+            self.nav_request_attractors[i] = attractors[i];
+            self.nav_request_clusters[i] = clusters[i];
+        }
+        self.nav_request_len = n;
+        self.nav_request_pending = true;
     }
 
     pub fn requestShutdown(self: *LiveQueue) void {
@@ -238,6 +257,42 @@ fn workerLoop(
     defer boot_stmt.finalize();
 
     while (!queue.shutdown.load(.acquire)) {
+        // Check for pending navmesh requests from main thread (timeline scrub)
+        {
+            queue.mutex.lock();
+            const pending = queue.nav_request_pending;
+            var req_att: [constants.NUM_ATTRACTORS]u16 = undefined;
+            var req_cls: [constants.NUM_ATTRACTORS]u8 = undefined;
+            var req_len: usize = 0;
+            if (pending) {
+                req_len = queue.nav_request_len;
+                for (0..req_len) |i| {
+                    req_att[i] = queue.nav_request_attractors[i];
+                    req_cls[i] = queue.nav_request_clusters[i];
+                }
+                queue.nav_request_pending = false;
+            }
+            queue.mutex.unlock();
+
+            if (pending and req_len > 0 and nav_adj != null) {
+                const path_result = navmesh.computePaths(
+                    nav_adj.?,
+                    nav_adj_len.?,
+                    nav_local_to_name.?,
+                    nav_name_to_local.?,
+                    req_att[0..req_len],
+                    req_cls[0..req_len],
+                    page,
+                ) catch null;
+                if (path_result) |pr| {
+                    nav_paths = pr.paths;
+                    nav_num_paths = pr.num_paths;
+                    queue.pushNavPaths(nav_paths, nav_num_paths);
+                    std.debug.print("Worker: recomputed {d} navmesh paths (main request)\n", .{nav_num_paths});
+                }
+            }
+        }
+
         // Try to get next snapshot — either from bootstrap or live poll
         var snap_id: i64 = 0;
         var snap_ts_raw: ?[]const u8 = null;
@@ -372,33 +427,8 @@ fn workerLoop(
                 attractor_labels = data.kmeansAttractors(attractor_synsets, &anchors, k, page) catch &.{};
                 num_attractors = attractor_synsets.len;
 
-                // Compute navmesh paths (first time + live attractor changes)
-                if (nav_num_paths == 0 or !bootstrapping) {
-                    if (nav_adj) |adj| {
-                        var att_ni: [constants.NUM_ATTRACTORS]u16 = undefined;
-                        for (attractor_synsets, 0..) |aname, ai| {
-                            att_ni[ai] = name_to_idx.get(aname) orelse 0;
-                        }
-                        const path_result = navmesh.computePaths(
-                            adj,
-                            nav_adj_len.?,
-                            nav_local_to_name.?,
-                            nav_name_to_local.?,
-                            att_ni[0..num_attractors],
-                            attractor_labels,
-                            page,
-                        ) catch |err| blk: {
-                            std.debug.print("Worker: computePaths failed: {}\n", .{err});
-                            break :blk null;
-                        };
-                        if (path_result) |pr| {
-                            nav_paths = pr.paths;
-                            nav_num_paths = pr.num_paths;
-                            queue.pushNavPaths(nav_paths, nav_num_paths);
-                            std.debug.print("Worker: computed {d} navmesh paths\n", .{nav_num_paths});
-                        }
-                    }
-                }
+                // Navmesh paths are now computed on-demand via main thread requests
+                // (requestNavPaths) when the displayed attractor set changes.
             }
         }
 
