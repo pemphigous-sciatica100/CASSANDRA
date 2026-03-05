@@ -214,6 +214,68 @@ pub fn assignAllClusters(
     return .{ .cluster = cluster, .nearest = best_idx };
 }
 
+// Find top N attractors by delta (recent activity), falling back to cumulative update_count
+pub fn findAttractorsByDelta(delta_map: *std.StringHashMap(i64), snapshot: *std.StringHashMap(SnapshotEntry), allocator: std.mem.Allocator) ![][]const u8 {
+    const Entry = struct {
+        name: []const u8,
+        count: i64,
+    };
+    var entries = std.ArrayList(Entry).init(allocator);
+    defer entries.deinit();
+
+    // Collect nuclei with positive delta
+    var it = delta_map.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.* > 0) {
+            try entries.append(.{ .name = e.key_ptr.*, .count = e.value_ptr.* });
+        }
+    }
+
+    // Sort by delta descending
+    const items = entries.items;
+    std.mem.sort(Entry, items, {}, struct {
+        fn cmp(_: void, a: Entry, b: Entry) bool {
+            return a.count > b.count;
+        }
+    }.cmp);
+
+    const n_delta = @min(constants.NUM_ATTRACTORS, items.len);
+    const result = try allocator.alloc([]const u8, constants.NUM_ATTRACTORS);
+
+    // Fill from delta-sorted entries
+    for (0..n_delta) |i| {
+        result[i] = items[i].name;
+    }
+
+    // Pad remaining slots with top cumulative entries not already included
+    if (n_delta < constants.NUM_ATTRACTORS) {
+        const cumulative = try findAttractors(snapshot, allocator);
+        defer allocator.free(cumulative);
+        var filled: usize = n_delta;
+        for (cumulative) |name| {
+            if (filled >= constants.NUM_ATTRACTORS) break;
+            // Skip if already in result from delta
+            var dup = false;
+            for (0..filled) |j| {
+                if (std.mem.eql(u8, result[j], name)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                result[filled] = name;
+                filled += 1;
+            }
+        }
+        // Shrink if we couldn't fill all slots
+        if (filled < constants.NUM_ATTRACTORS) {
+            return allocator.realloc(result, filled);
+        }
+    }
+
+    return result;
+}
+
 // Find top N attractors by update_count from a snapshot
 pub fn findAttractors(snapshot: *std.StringHashMap(SnapshotEntry), allocator: std.mem.Allocator) ![][]const u8 {
     const Entry = struct {

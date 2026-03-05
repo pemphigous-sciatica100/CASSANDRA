@@ -354,7 +354,7 @@ fn workerLoop(
         // Determine attractors from the running snapshot_map
         // (On bootstrap, the last snapshot's counts are the cumulative counts)
         {
-            const raw_att = data.findAttractors(&snapshot_map, alloc) catch &.{};
+            const raw_att = data.findAttractorsByDelta(&delta_map, &snapshot_map, alloc) catch &.{};
             if (raw_att.len > 0) {
                 // Dupe attractor names to persistent allocator
                 if (page.alloc([]const u8, raw_att.len)) |buf| {

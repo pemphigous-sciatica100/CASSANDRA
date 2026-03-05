@@ -42,6 +42,7 @@ pub fn main() !void {
     const default_bounds = camera.Bounds{ .min_x = -20, .max_x = 20, .min_y = -20, .max_y = 20 };
     var cam_state = camera.CameraState.init(default_bounds, rl.getScreenWidth(), rl.getScreenHeight());
     var tl = timeline_mod.Timeline.init();
+    tl.playing = true;
     var search = ui.SearchState{};
     var cluster_filter = ui.ClusterFilter{};
 
@@ -55,6 +56,7 @@ pub fn main() !void {
 
     var interp_buf: ?[]data.Point = null;
     var phys = physics.PhysicsState.init(allocator);
+    phys.toggle();
     var phys_buf: ?[]data.Point = null;
     var prev_ki: usize = std.math.maxInt(usize);
     var needs_camera_fit = true;
