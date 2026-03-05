@@ -44,6 +44,17 @@ pub const CameraState = struct {
     dragging: bool = false,
     drag_start: rl.Vector2 = .{ .x = 0, .y = 0 },
     selected_point: ?u16 = null,
+    double_clicked: bool = false, // true for one frame on double-click of a point
+    last_click_time: f64 = 0,
+    last_click_point: ?u16 = null,
+
+    // Animated zoom transition
+    anim_active: bool = false,
+    anim_progress: f32 = 0, // 0..1
+    anim_from_zoom: f32 = 0,
+    anim_to_zoom: f32 = 0,
+    anim_from_target: rl.Vector2 = .{ .x = 0, .y = 0 },
+    anim_to_target: rl.Vector2 = .{ .x = 0, .y = 0 },
 
     pub fn init(b: Bounds, sw: c_int, sh: c_int) CameraState {
         var self = CameraState{
@@ -68,16 +79,51 @@ pub const CameraState = struct {
         };
     }
 
+    const MAX_ZOOM: f32 = 500.0;
+    const MIN_ZOOM: f32 = 2.0;
+    const ANIM_DURATION: f32 = 1.0; // seconds
+
+    fn startAnim(self: *CameraState, to_zoom: f32, to_target: rl.Vector2) void {
+        self.anim_from_zoom = self.cam.zoom;
+        self.anim_to_zoom = to_zoom;
+        self.anim_from_target = self.cam.target;
+        self.anim_to_target = to_target;
+        self.anim_progress = 0;
+        self.anim_active = true;
+    }
+
+    // Smooth ease-in-out
+    fn easeInOut(t: f32) f32 {
+        return t * t * (3.0 - 2.0 * t);
+    }
+
     pub fn update(self: *CameraState, points: ?[]const data.Point, sw: c_int, sh: c_int, frame_bvh: ?*const bvh.FrameBvh, cf: *const ui.ClusterFilter) void {
         self.cam.offset = rl.vec2(@as(f32, @floatFromInt(sw)) / 2.0, @as(f32, @floatFromInt(sh)) / 2.0);
 
+        // Drive animation
+        if (self.anim_active) {
+            self.anim_progress += rl.getFrameTime() / ANIM_DURATION;
+            if (self.anim_progress >= 1.0) {
+                self.anim_progress = 1.0;
+                self.anim_active = false;
+            }
+            const t = easeInOut(self.anim_progress);
+            // Zoom in log space so visual rate of change is uniform
+            const log_from = @log(self.anim_from_zoom);
+            const log_to = @log(self.anim_to_zoom);
+            self.cam.zoom = @exp(log_from + (log_to - log_from) * t);
+            self.cam.target.x = self.anim_from_target.x + (self.anim_to_target.x - self.anim_from_target.x) * t;
+            self.cam.target.y = self.anim_from_target.y + (self.anim_to_target.y - self.anim_from_target.y) * t;
+        }
+
         const wheel = rl.getMouseWheelMove();
         if (wheel != 0) {
+            self.anim_active = false; // cancel animation on manual zoom
             const mouse_pos = rl.getMousePosition();
             const world_before = rl.getScreenToWorld2D(mouse_pos, self.cam);
 
             self.cam.zoom *= if (wheel > 0) 1.1 else 1.0 / 1.1;
-            self.cam.zoom = std.math.clamp(self.cam.zoom, 2.0, 500.0);
+            self.cam.zoom = std.math.clamp(self.cam.zoom, MIN_ZOOM, MAX_ZOOM);
 
             const world_after = rl.getScreenToWorld2D(mouse_pos, self.cam);
             self.cam.target.x += world_before.x - world_after.x;
@@ -85,15 +131,45 @@ pub const CameraState = struct {
         }
 
         if (rl.isMouseButtonPressed(rl.MOUSE_BUTTON_RIGHT)) {
+            self.anim_active = false;
             self.dragging = true;
             self.drag_start = rl.getMousePosition();
         }
+        self.double_clicked = false;
         if (rl.isMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
             const mouse_pos = rl.getMousePosition();
             if (mouse_pos.y < @as(f32, @floatFromInt(sh)) - 50) {
                 const world_pos = rl.getScreenToWorld2D(mouse_pos, self.cam);
                 const hit = hitTest(world_pos, points, self.cam.zoom, frame_bvh, cf);
                 self.selected_point = hit;
+
+                // Double-click detection (same point within 400ms)
+                const now = rl.c.GetTime();
+                if (hit != null and hit.? == (self.last_click_point orelse ~@as(u16, 0)) and now - self.last_click_time < 0.4) {
+                    self.double_clicked = true;
+                    self.last_click_point = null;
+
+                    // Animate: zoom in to point, or zoom out if already at max
+                    const pts = points orelse &.{};
+                    if (hit.? < pts.len) {
+                        const p = pts[hit.?];
+                        const target = rl.vec2(p.x, p.y);
+                        if (self.cam.zoom >= MAX_ZOOM * 0.9) {
+                            // Already zoomed in — zoom out to fit
+                            const swf: f32 = @floatFromInt(sw);
+                            const shf: f32 = @floatFromInt(sh);
+                            const m: f32 = 0.9;
+                            const fit_zoom = @min((swf * m) / self.bounds.width(), (shf * m) / self.bounds.height());
+                            self.startAnim(fit_zoom, self.bounds.center());
+                        } else {
+                            self.startAnim(MAX_ZOOM, target);
+                        }
+                    }
+                } else {
+                    self.last_click_time = now;
+                    self.last_click_point = hit;
+                }
+
                 // Left-click on empty space starts a drag
                 if (hit == null) {
                     self.dragging = true;
@@ -114,6 +190,7 @@ pub const CameraState = struct {
         }
 
         if (rl.isKeyPressed(rl.KEY_HOME)) {
+            self.anim_active = false;
             self.fitToScreen(sw, sh);
             self.selected_point = null;
         }
