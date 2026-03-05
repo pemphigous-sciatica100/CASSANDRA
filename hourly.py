@@ -17,7 +17,6 @@ Run via cron:  0 * * * * cd /home/chrisbe/dev/wordnets && .venv/bin/python hourl
 import os
 import re
 import json
-import sys
 import numpy as np
 import feedparser
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from pathlib import Path
 from sklearn.manifold import TSNE
 
 from prototype import WordNetNucleusModel
+from db import get_connection, ensure_schema, save_snapshot as db_save_snapshot
 
 BASE_DIR = Path(__file__).parent
 GLOVE_PATH = BASE_DIR / 'data' / 'glove.6B.50d.txt'
@@ -226,19 +226,6 @@ def load_previous_snapshot():
         return json.load(f)
 
 
-def save_snapshot(snapshot, timestamp):
-    path = SNAPSHOTS_DIR / f"snap_{timestamp}.json"
-    atomic_write_json(path, snapshot)
-    return path
-
-
-def save_delta(delta, timestamp):
-    """Save per-nucleus hit counts for this run."""
-    path = SNAPSHOTS_DIR / f"delta_{timestamp}.json"
-    atomic_write_json(path, delta)
-    return path
-
-
 def main():
     timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
     print(f"\n{'='*60}")
@@ -277,17 +264,20 @@ def main():
     # 5. Save model state
     model.save(str(MODEL_STATE_PATH))
 
-    # 6. Save snapshot + delta
+    # 6. Build snapshot
     snapshot = model.snapshot()
-    snap_path = save_snapshot(snapshot, timestamp)
-    delta_path = save_delta(delta, timestamp)
-    print(f"  Snapshot saved: {snap_path}")
-    print(f"  Delta saved: {delta_path}")
 
     # 7. Compute/load positions (needed for renderer)
     positions = load_or_compute_positions(model)
 
-    # 8. Summary
+    # 8. Write to SQLite
+    db_conn = get_connection()
+    ensure_schema(db_conn)
+    db_save_snapshot(db_conn, snapshot, delta, positions, timestamp)
+    db_conn.close()
+    print(f"  SQLite snapshot saved")
+
+    # 9. Summary
     top_hot = sorted(delta.items(), key=lambda x: x[1], reverse=True)[:10]
     print(f"\nTop 10 hottest nuclei this run:")
     for name, count in top_hot:

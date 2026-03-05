@@ -11,6 +11,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // SQLite amalgamation — compiled as C source
+    exe.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION" },
+    });
+    exe.addIncludePath(b.path("vendor/sqlite3"));
+
     exe.linkSystemLibrary("raylib");
     exe.linkLibC();
 

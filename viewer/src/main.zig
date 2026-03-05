@@ -19,11 +19,8 @@ pub fn main() !void {
 
     var nd = data.NucleusData.init(allocator);
 
-    // Load positions (fast: ~138KB JSON)
-    data.loadPositions(&nd, "../nucleus_positions.json") catch {
-        std.debug.print("Warning: no positions file yet\n", .{});
-    };
-    std.debug.print("Loaded {d} positions\n", .{nd.positions.count()});
+    // Positions are loaded by the worker thread from SQLite
+    std.debug.print("Positions will be loaded from SQLite by worker thread\n", .{});
 
     // --- Spawn worker thread (handles all snapshot loading + live) ---
     var running_recency = std.StringHashMap(i64).init(allocator);
