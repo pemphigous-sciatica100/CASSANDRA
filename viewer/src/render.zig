@@ -226,7 +226,11 @@ fn drawOneLabel(p: data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, fo
     buf[len] = 0;
     const text: [*:0]const u8 = @ptrCast(&buf);
 
-    rl.drawTextEx(font, text, rl.vec2(screen_pos.x + 8, screen_pos.y - font_size / 2), font_size, 1.0, col);
+    const tx = @round(screen_pos.x + 8);
+    const ty = @round(screen_pos.y - font_size / 2);
+    const shadow_a: u8 = @intFromFloat(@min(180.0, 180.0 * label_alpha));
+    rl.drawTextEx(font, text, rl.vec2(tx + 1, ty + 1), font_size, 1.0, rl.color(0, 0, 0, shadow_a));
+    rl.drawTextEx(font, text, rl.vec2(tx, ty), font_size, 1.0, col);
 }
 
 
