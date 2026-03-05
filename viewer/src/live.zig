@@ -160,6 +160,7 @@ fn workerLoop(
     var prev_arena: ?std.heap.ArenaAllocator = null;
     var last_snapshot_id: i64 = 0;
     var bootstrapping = true;
+    var boot_count: u32 = 0;
 
     // Bootstrap: list all snapshot IDs
     var boot_stmt = database.listSnapshotIds() catch {
@@ -181,7 +182,7 @@ fn workerLoop(
                 snap_wall_time = boot_stmt.columnInt(2);
             } else {
                 bootstrapping = false;
-                std.debug.print("Worker: bootstrap complete\n", .{});
+                std.debug.print("Worker: bootstrap complete ({d} snapshots)\n", .{boot_count});
                 continue;
             }
         } else {
@@ -376,7 +377,10 @@ fn workerLoop(
         last_snapshot_id = snap_id;
 
         if (bootstrapping) {
-            std.debug.print("  Bootstrap: {s} ({d} points)\n", .{ ts_copy, kf.points.len });
+            boot_count += 1;
+            if (boot_count % 100 == 0) {
+                std.debug.print("  Bootstrap: {d} snapshots loaded\n", .{boot_count});
+            }
         } else {
             std.debug.print("Live: prepared {s} ({d} points)\n", .{ ts_copy, kf.points.len });
         }
