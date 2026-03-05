@@ -107,20 +107,21 @@ fn labelImportance(p: data.Point, max_delta: f32, zoom: f32) f32 {
     return @max(motion, zoom_reveal) * p.fade;
 }
 
-/// Label budget scales with zoom: 12 when fully zoomed out, 50 when zoomed in.
+/// Label budget scales with zoom: 12 when fully zoomed out, up to MAX_LABELS when zoomed in.
 fn labelBudget(zoom: f32) usize {
     const t = std.math.clamp((zoom - 10.0) / 60.0, 0.0, 1.0); // 0 at zoom<=10, 1 at zoom>=70
-    return @intFromFloat(12.0 + 38.0 * t);
+    const t2 = std.math.clamp((zoom - 70.0) / 200.0, 0.0, 1.0); // extra budget for deep zoom
+    return @intFromFloat(12.0 + 38.0 * t + @as(f32, MAX_LABELS - 50) * t2);
 }
 
-/// Importance threshold: stricter when zoomed out (0.4) to suppress noise, relaxes when zoomed in (0.15).
+/// Importance threshold: stricter when zoomed out (0.4), relaxes to 0 at deep zoom (all labels visible).
 fn labelThreshold(zoom: f32) f32 {
-    const t = std.math.clamp((zoom - 10.0) / 60.0, 0.0, 1.0);
-    return 0.4 - 0.25 * t; // 0.4 → 0.15
+    const t = std.math.clamp((zoom - 10.0) / 100.0, 0.0, 1.0);
+    return 0.4 - 0.4 * t; // 0.4 → 0.0
 }
 
 const LabelSlot = struct { idx: u16, importance: f32 };
-const MAX_LABELS = 50;
+const MAX_LABELS = 200;
 
 pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, font: rl.Font, cf: *const ui.ClusterFilter, max_delta: f32, visible: []const u16) void {
     const sw: f32 = @floatFromInt(rl.getScreenWidth());
