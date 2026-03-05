@@ -234,11 +234,12 @@ fn pointInPolygon(pts: [][2]f32, px: f32, py: f32) bool {
 fn fillPolygon(pts: [][2]f32, tris: []const u16, col: rl.Color) void {
     var i: usize = 0;
     while (i + 2 < tris.len) : (i += 3) {
-        const a = rl.vec2(pts[tris[i]][0], pts[tris[i]][1]);
-        const b = rl.vec2(pts[tris[i + 1]][0], pts[tris[i + 1]][1]);
-        const c = rl.vec2(pts[tris[i + 2]][0], pts[tris[i + 2]][1]);
-        rl.drawTriangle(a, b, c, col);
-        rl.drawTriangle(a, c, b, col);
+        rl.drawTriangle(
+            rl.vec2(pts[tris[i]][0], pts[tris[i]][1]),
+            rl.vec2(pts[tris[i + 1]][0], pts[tris[i + 1]][1]),
+            rl.vec2(pts[tris[i + 2]][0], pts[tris[i + 2]][1]),
+            col,
+        );
     }
 }
 
@@ -286,15 +287,15 @@ fn earClip(raw_pts: [][2]f32, allocator: std.mem.Allocator) ![]u16 {
         const nx = next[ear];
 
         if (isEar(pts, prev, next, p, ear, nx, remaining, ccw)) {
-            // Emit triangle — CCW winding for Raylib front face
+            // Emit triangle — Raylib DrawTriangle expects CW screen-space
             if (ccw) {
-                try tris.append(p);
-                try tris.append(ear);
                 try tris.append(nx);
+                try tris.append(ear);
+                try tris.append(p);
             } else {
-                try tris.append(nx);
-                try tris.append(ear);
                 try tris.append(p);
+                try tris.append(ear);
+                try tris.append(nx);
             }
 
             // Remove ear from linked list
