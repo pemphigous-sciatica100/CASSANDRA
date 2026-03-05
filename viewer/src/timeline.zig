@@ -35,9 +35,7 @@ pub const Timeline = struct {
     speed_idx: u8 = 2, // default 0.1x
     num_keyframes: u32 = 0,
     tick_fracs: ?[]f32 = null, // timestamp-proportional positions [0..1]
-    follow_target: ?f32 = null, // live-follow: smoothly drift towards this time
-    arrival_interval: f32 = 4.0, // seconds between keyframe arrivals (measured)
-    time_since_last_arrival: f32 = 0.0, // wall-clock accumulator
+    follow_target: ?f32 = null, // live-follow: smoothly track this time
 
     pub fn init(num_kf: u32) Timeline {
         return .{
@@ -84,30 +82,25 @@ pub const Timeline = struct {
         }
     }
 
-    /// Record that a new keyframe arrived. Updates the measured arrival interval.
     pub fn noteArrival(self: *Timeline) void {
-        if (self.time_since_last_arrival > 0.5) {
-            // Exponential moving average to smooth out jitter
-            self.arrival_interval = self.arrival_interval * 0.3 + self.time_since_last_arrival * 0.7;
-        }
-        self.time_since_last_arrival = 0;
+        _ = self;
     }
 
     pub fn update(self: *Timeline, dt: f32) void {
         const max_t: f32 = @floatFromInt(self.num_keyframes -| 1);
-        self.time_since_last_arrival += dt;
 
-        // Live-follow: drift towards target at the measured arrival rate
+        // Live-follow: proportional error controller
+        // Speed is proportional to how far behind we are — naturally catches up
+        // and slows down as it approaches the target.
         if (self.follow_target) |target| {
-            // Speed = 1 keyframe per arrival_interval, with a floor to avoid stalling
-            const drift_speed = 1.0 / @max(self.arrival_interval, 1.0);
-            const diff = target - self.current_time;
-            if (@abs(diff) < 0.01) {
+            const err = target - self.current_time;
+            if (@abs(err) < 0.01) {
                 self.current_time = target;
                 self.follow_target = null;
             } else {
-                // Lerp with rate-matched speed; clamp so we don't overshoot
-                self.current_time += @min(drift_speed * dt, @abs(diff));
+                // Gain of 3.0: settles in ~1s for a 1-keyframe gap, faster when further behind
+                const catch_up = @max(@abs(err) * 3.0, 0.5);
+                self.current_time += @min(catch_up * dt, @abs(err));
             }
         }
 

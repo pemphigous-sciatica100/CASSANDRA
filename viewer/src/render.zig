@@ -130,30 +130,7 @@ pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: 
     }
 }
 
-pub fn drawUncertaintyArrows(points: []const data.Point, cf: *const ui.ClusterFilter) void {
-    for (points) |p| {
-        if (hidden(cf, p.cluster)) continue;
-        if (p.fade < 0.1) continue;
-        if (@abs(p.u_shift) < 0.001) continue;
-        const dir: f32 = if (p.u_shift > 0) -1.0 else 1.0;
-        const len = @min(@abs(p.u_shift) * 3.0, 0.4);
-        const start = rl.vec2(p.x, p.y);
-        const end = rl.vec2(p.x, p.y + dir * len);
-        const alpha: u8 = @intFromFloat(@min(180.0, 180.0 * p.fade));
-        const col = if (p.u_shift > 0)
-            rl.color(255, 100, 100, alpha)
-        else
-            rl.color(100, 255, 100, alpha);
-        rl.drawLineV(start, end, col);
-        const hs: f32 = 0.06;
-        rl.drawTriangle(
-            rl.vec2(end.x, end.y + dir * hs),
-            rl.vec2(end.x - hs * 0.5, end.y),
-            rl.vec2(end.x + hs * 0.5, end.y),
-            col,
-        );
-    }
-}
+
 
 pub fn drawVignette(sw: c_int, sh: c_int) void {
     _ = sw;

@@ -102,20 +102,25 @@ pub fn main() !void {
             nd.keyframes.append(kf) catch {};
 
             // Drop oldest keyframes if over the cap
+            var evicted: u32 = 0;
             while (nd.keyframes.items.len > constants.MAX_KEYFRAMES) {
                 const old_kf = nd.keyframes.orderedRemove(0);
                 allocator.free(old_kf.points);
-                tl.current_time = @max(tl.current_time - 1.0, 0.0);
-                if (tl.follow_target) |ft| {
-                    tl.follow_target = @max(ft - 1.0, 0.0);
-                }
+                evicted += 1;
+            }
+            if (evicted > 0) {
+                tl.current_time = @max(tl.current_time - @as(f32, @floatFromInt(evicted)), 0.0);
             }
 
             tl.num_keyframes = @intCast(nd.keyframes.items.len);
             tl.computeTickFracs(nd.keyframes.items, allocator) catch {};
             tl.noteArrival();
-            if (was_at_end or nd.keyframes.items.len == 1) {
-                tl.follow_target = @floatFromInt(tl.num_keyframes - 1);
+            const following = was_at_end or nd.keyframes.items.len == 1 or tl.follow_target != null;
+            if (following) {
+                // Snap playhead to end — no lag during fast bootstrap or eviction
+                const end: f32 = @floatFromInt(tl.num_keyframes - 1);
+                tl.current_time = end;
+                tl.follow_target = null;
             }
 
             // Clean up result (frees arena — we've copied what we need)
@@ -220,7 +225,7 @@ pub fn main() !void {
         render.drawGlow(render_points, cur_kf.max_delta, &cluster_filter);
         render.drawDots(render_points, cur_kf.max_total, cur_kf.max_delta, &cluster_filter);
         render.drawAttractorRings(render_points, &cluster_filter);
-        render.drawUncertaintyArrows(render_points, &cluster_filter);
+
         if (cam_state.selected_point) |sel| {
             render.drawHighlight(render_points, sel);
         }
