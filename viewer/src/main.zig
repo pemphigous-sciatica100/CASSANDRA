@@ -11,6 +11,7 @@ const live = @import("live.zig");
 const bvh = @import("bvh.zig");
 const effects = @import("effects.zig");
 const navmesh = @import("navmesh.zig");
+const worldmap_mod = @import("worldmap.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -37,6 +38,13 @@ pub fn main() !void {
     rl.setTargetFPS(constants.TARGET_FPS);
 
     const font = rl.getFontDefault();
+
+    // Load world map background
+    var wmap: ?worldmap_mod.WorldMap = worldmap_mod.WorldMap.load(allocator, "data/world.bin") catch |err| blk: {
+        std.debug.print("worldmap: load failed: {}, continuing without map\n", .{err});
+        break :blk null;
+    };
+    _ = &wmap;
 
     // Start with default bounds — camera will fit when first data arrives
     const default_bounds = camera.Bounds{ .min_x = -20, .max_x = 20, .min_y = -20, .max_y = 20 };
@@ -363,6 +371,7 @@ pub fn main() !void {
 
         rl.beginMode2D(cam_state.cam);
         render.drawGrid(cam_state.cam, sw, sh);
+        if (wmap) |*m| m.draw(cam_state.cam, sw, sh);
         if (navmesh_on and nav_num_paths > 0) {
             render.drawNavmesh(render_points, nav_paths[0..nav_num_paths], &cluster_filter, navmesh_focus);
         }
@@ -386,6 +395,12 @@ pub fn main() !void {
         }
 
         // Labels, vignette, and HUD drawn AFTER effects so they stay crisp
+        // World map labels (very dim, behind nucleus labels)
+        if (wmap) |*m| {
+            rl.beginMode2D(cam_state.cam);
+            m.drawLabels(cam_state.cam, font);
+            rl.endMode2D();
+        }
         render.drawLabels(render_points, &nd, cam_state.cam, font, &cluster_filter, cur_kf.max_delta, visible);
         if (navmesh_on and navmesh_focus != null) {
             render.drawNavmeshLabels(render_points, &nd, cam_state.cam, font);
