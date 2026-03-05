@@ -371,6 +371,9 @@ pub fn main() !void {
             }
         }
 
+        // Update region heat from nucleus activity
+        if (wmap) |*m| m.updateHeat(render_points, &nd, cur_kf.max_delta);
+
         rl.beginMode2D(cam_state.cam);
         render.drawGrid(cam_state.cam, sw, sh);
         if (wmap) |*m| m.draw(cam_state.cam, sw, sh);
