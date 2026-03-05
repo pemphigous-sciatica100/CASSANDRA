@@ -10,16 +10,17 @@ pub const ReadyKeyframe = struct {
     new_names: std.ArrayList(NameEntry),
     // New positions
     new_positions: std.ArrayList(PosEntry),
-    // Delta map for recency update
-    delta_keys: std.ArrayList([]const u8),
+    // Attractor info for main thread to update nd
+    attractor_name_indices: [constants.NUM_ATTRACTORS]u16,
+    num_attractors: usize,
     // Arena that owns all string data in this result
     arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *ReadyKeyframe) void {
+        // Don't free arena — worker's persistent state (recency, anchors, name_to_idx)
+        // holds keys allocated from per-snapshot arenas.
         self.new_names.deinit();
         self.new_positions.deinit();
-        self.delta_keys.deinit();
-        // Don't deinit arena — main thread takes ownership of strings
     }
 };
 
@@ -42,11 +43,6 @@ pub const LiveQueue = struct {
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
 
-    // Immutable config set once before spawning
-    attractor_synsets: []const []const u8 = &.{},
-    attractor_labels: []const u8 = &.{},
-    x_scale: f32 = 1.0,
-
     pub fn pop(self: *LiveQueue) ?*ReadyKeyframe {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -65,10 +61,9 @@ pub const LiveQueue = struct {
 
     pub fn spawn(
         self: *LiveQueue,
-        initial_timestamps: []const []const u8,
         nd_snapshot: *const NdSnapshot,
     ) void {
-        self.thread = std.Thread.spawn(.{}, workerLoop, .{ self, initial_timestamps, nd_snapshot }) catch return;
+        self.thread = std.Thread.spawn(.{}, workerLoop, .{ self, nd_snapshot }) catch return;
     }
 };
 
@@ -97,42 +92,101 @@ pub const NdSnapshot = struct {
 
 fn workerLoop(
     queue: *LiveQueue,
-    initial_timestamps: []const []const u8,
     nds: *const NdSnapshot,
 ) void {
     const page = std.heap.page_allocator;
 
-    // Worker's own copy of known timestamps
+    // Worker's mutable state
     var known = std.StringHashMap(void).init(page);
-    for (initial_timestamps) |ts| {
-        known.put(ts, {}) catch {};
-    }
-
-    // Worker's mutable copy of NdSnapshot data
     var positions = nds.positions;
     var anchors = nds.anchors;
     var name_to_idx = nds.name_to_idx;
     var next_idx = nds.next_idx;
+    var last_reported_idx: u16 = nds.next_idx;
     var recency = nds.recency;
-
-    // Track prev_snapshot for uncertainty shift computation
     var prev_snap: ?std.StringHashMap(data.SnapshotEntry) = null;
 
-    while (!queue.shutdown.load(.acquire)) {
-        // Sleep between scans
-        std.time.sleep(2 * std.time.ns_per_s);
-        if (queue.shutdown.load(.acquire)) break;
+    // Attractor state — computed during bootstrap
+    var attractor_synsets: []const []const u8 = &.{};
+    var attractor_labels: []const u8 = &.{};
+    var attractor_name_indices: [constants.NUM_ATTRACTORS]u16 = .{0} ** constants.NUM_ATTRACTORS;
+    var num_attractors: usize = 0;
 
-        // Don't produce if main thread hasn't consumed yet
+    const x_scale: f32 = @as(f32, @floatFromInt(constants.WINDOW_W)) / @as(f32, @floatFromInt(constants.WINDOW_H));
+
+    // --- Bootstrap: determine attractors from latest snapshot ---
+    const latest = findLatestTimestamp();
+    if (latest) |lt| {
+        const lts = lt.ts[0..lt.len];
+        std.debug.print("Worker: bootstrapping attractors from {s}\n", .{lts});
+
+        // Use a persistent arena for bootstrap parsing (keys go into anchors/name_to_idx)
+        var boot_arena = std.heap.ArenaAllocator.init(page);
+        const boot_alloc = boot_arena.allocator();
+
+        const snap_path = std.fmt.allocPrint(boot_alloc, "../snapshots/snap_{s}.json", .{lts}) catch null;
+        if (snap_path) |sp| {
+            if (readFile(boot_alloc, sp)) |snap_bytes| {
+                if (parseSnapshot(boot_alloc, snap_bytes, &anchors, &name_to_idx, &next_idx)) |snap_result| {
+                    var snap_mut = snap_result;
+                    const raw_att = data.findAttractors(&snap_mut, boot_alloc) catch &.{};
+                    // Dupe attractor names to page_allocator (persistent)
+                    if (page.alloc([]const u8, raw_att.len)) |buf| {
+                        var ok = true;
+                        for (raw_att, 0..) |name, i| {
+                            buf[i] = page.dupe(u8, name) catch {
+                                ok = false;
+                                break;
+                            };
+                        }
+                        if (ok) attractor_synsets = buf;
+                    } else |_| {}
+
+                    const k: u8 = @intCast(@min(constants.NUM_CLUSTERS, attractor_synsets.len));
+                    attractor_labels = data.kmeansAttractors(attractor_synsets, &anchors, k, page) catch &.{};
+
+                    for (attractor_synsets, 0..) |aname, i| {
+                        attractor_name_indices[i] = name_to_idx.get(aname) orelse 0;
+                    }
+                    num_attractors = attractor_synsets.len;
+
+                    std.debug.print("Worker: {d} attractors\n", .{num_attractors});
+                    snap_mut.deinit();
+                } else |_| {}
+            } else |_| {}
+        }
+        // Don't free boot_arena — keys live in anchors/name_to_idx
+    }
+
+    // --- Bootstrap: process all existing snapshots chronologically ---
+    // findNewTimestamp returns the oldest unknown, so the loop naturally processes in order
+    var bootstrapping = true;
+
+    while (!queue.shutdown.load(.acquire)) {
+        if (!bootstrapping) {
+            std.time.sleep(2 * std.time.ns_per_s);
+            if (queue.shutdown.load(.acquire)) break;
+        }
+
+        // Wait for slot to be free
         {
             queue.mutex.lock();
             const has_pending = queue.ready != null;
             queue.mutex.unlock();
-            if (has_pending) continue;
+            if (has_pending) {
+                std.time.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
         }
 
-        // Scan for first unknown snapshot
-        const ts_buf = findNewTimestamp(&known) orelse continue;
+        // Find next timestamp to process
+        const ts_buf = findNewTimestamp(&known) orelse {
+            if (bootstrapping) {
+                bootstrapping = false;
+                std.debug.print("Worker: bootstrap complete\n", .{});
+            }
+            continue;
+        };
         const ts = ts_buf.ts[0..ts_buf.len];
 
         // Read and parse
@@ -142,7 +196,6 @@ fn workerLoop(
         const snap_path = std.fmt.allocPrint(alloc, "../snapshots/snap_{s}.json", .{ts}) catch continue;
         const delta_path = std.fmt.allocPrint(alloc, "../snapshots/delta_{s}.json", .{ts}) catch continue;
 
-        // Read files
         const snap_bytes = readFile(alloc, snap_path) catch continue;
         const delta_bytes = readFile(alloc, delta_path) catch continue;
         const pos_bytes = readFile(alloc, "../nucleus_positions.json") catch null;
@@ -155,14 +208,6 @@ fn workerLoop(
 
         // Parse snapshot
         var snapshot_map = parseSnapshot(alloc, snap_bytes, &anchors, &name_to_idx, &next_idx) catch continue;
-        var new_names = std.ArrayList(NameEntry).init(alloc);
-        // Collect new name entries
-        var snap_it = snapshot_map.iterator();
-        while (snap_it.next()) |entry| {
-            // Check if this is a new name the main thread doesn't know about
-            // (name_to_idx was cloned from nd, so new entries are worker-only)
-            _ = entry;
-        }
 
         // Parse delta
         var delta_map = parseDelta(alloc, delta_bytes) catch std.StringHashMap(i64).init(alloc);
@@ -172,12 +217,10 @@ fn workerLoop(
         while (age_it.next()) |entry| {
             entry.value_ptr.* += 1;
         }
-        var delta_keys = std.ArrayList([]const u8).init(alloc);
         var dk_it = delta_map.iterator();
         while (dk_it.next()) |d_entry| {
             const key = alloc.dupe(u8, d_entry.key_ptr.*) catch continue;
             recency.put(key, 0) catch {};
-            delta_keys.append(d_entry.key_ptr.*) catch {};
         }
         // Evict old
         const evict_threshold: u32 = @intFromFloat(constants.FADE_WINDOW * 2);
@@ -205,20 +248,18 @@ fn workerLoop(
             &delta_map,
             &recency,
             if (prev_snap) |*ps| ps else null,
-            queue.attractor_synsets,
-            queue.attractor_labels,
+            attractor_synsets,
+            attractor_labels,
             ts_copy,
-            queue.x_scale,
+            x_scale,
         ) catch continue;
 
-        // Collect new names added by this parse
-        // We detect these by checking name_to_idx size vs original next_idx
+        // Collect new names added since last push
+        var new_names = std.ArrayList(NameEntry).init(alloc);
         var nm_it = name_to_idx.iterator();
         while (nm_it.next()) |entry| {
-            if (entry.value_ptr.* >= nds.next_idx) {
-                // This is a name the worker added
+            if (entry.value_ptr.* >= last_reported_idx) {
                 const synset_copy = alloc.dupe(u8, entry.key_ptr.*) catch continue;
-                // Find the word from snapshot
                 const word = if (snapshot_map.get(entry.key_ptr.*)) |se| se.word else entry.key_ptr.*;
                 const word_copy = alloc.dupe(u8, word) catch continue;
                 new_names.append(.{
@@ -227,6 +268,12 @@ fn workerLoop(
                     .idx = entry.value_ptr.*,
                 }) catch {};
             }
+        }
+        last_reported_idx = next_idx;
+
+        // Update attractor name indices (may change as new names are registered)
+        for (attractor_synsets, 0..) |aname, i| {
+            attractor_name_indices[i] = name_to_idx.get(aname) orelse 0;
         }
 
         // Update prev_snap
@@ -240,7 +287,8 @@ fn workerLoop(
             .timestamp = ts_copy,
             .new_names = new_names,
             .new_positions = new_positions,
-            .delta_keys = delta_keys,
+            .attractor_name_indices = attractor_name_indices,
+            .num_attractors = num_attractors,
             .arena = arena,
         };
 
@@ -252,14 +300,20 @@ fn workerLoop(
         }
 
         // Mark as known
-        known.put(ts_copy, {}) catch {};
+        const ts_known = page.dupe(u8, ts) catch continue;
+        known.put(ts_known, {}) catch {};
 
-        std.debug.print("Live: prepared {s} ({d} points)\n", .{ ts, kf.points.len });
+        if (bootstrapping) {
+            std.debug.print("  Bootstrap: {s} ({d} points)\n", .{ ts, kf.points.len });
+        } else {
+            std.debug.print("Live: prepared {s} ({d} points)\n", .{ ts, kf.points.len });
+        }
     }
 }
 
 const TsBuf = struct { ts: [20]u8, len: u8 };
 
+/// Find the oldest snapshot timestamp not yet in `known`.
 fn findNewTimestamp(known: *std.StringHashMap(void)) ?TsBuf {
     var dir = std.fs.cwd().openDir("../snapshots", .{ .iterate = true }) catch return null;
     defer dir.close();
@@ -278,6 +332,29 @@ fn findNewTimestamp(known: *std.StringHashMap(void)) ?TsBuf {
                     @memcpy(buf[0..ts.len], ts);
                     best = .{ .ts = buf, .len = @intCast(ts.len) };
                 }
+            }
+        }
+    }
+    return best;
+}
+
+/// Find the latest snapshot timestamp (for attractor detection).
+fn findLatestTimestamp() ?TsBuf {
+    var dir = std.fs.cwd().openDir("../snapshots", .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var best: ?TsBuf = null;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+        if (name.len >= 5 and std.mem.eql(u8, name[0..5], "snap_") and std.mem.endsWith(u8, name, ".json")) {
+            const ts = name[5 .. name.len - 5];
+            if (ts.len > 20) continue;
+            if (best == null or std.mem.order(u8, ts, best.?.ts[0..best.?.len]) == .gt) {
+                var buf: [20]u8 = undefined;
+                @memcpy(buf[0..ts.len], ts);
+                best = .{ .ts = buf, .len = @intCast(ts.len) };
             }
         }
     }

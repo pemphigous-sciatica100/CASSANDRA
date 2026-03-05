@@ -14,107 +14,20 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     std.debug.print("CASSANDRA Nucleus Viewer\n", .{});
-    std.debug.print("Loading data...\n", .{});
 
     var nd = data.NucleusData.init(allocator);
 
-    // Load positions
-    try data.loadPositions(&nd, "../nucleus_positions.json");
+    // Load positions (fast: ~138KB JSON)
+    data.loadPositions(&nd, "../nucleus_positions.json") catch {
+        std.debug.print("Warning: no positions file yet\n", .{});
+    };
     std.debug.print("Loaded {d} positions\n", .{nd.positions.count()});
 
-    // Scan for snapshots
-    const timestamps = try data.scanSnapshots(allocator, "../snapshots");
-    std.debug.print("Found {d} snapshot timestamps\n", .{timestamps.len});
-
-    if (timestamps.len == 0) {
-        std.debug.print("ERROR: No snapshots found in ../snapshots/\n", .{});
-        return;
-    }
-
-    // Load the latest snapshot to determine attractors
-    var latest_snapshot = try data.loadSnapshot(&nd, timestamps[timestamps.len - 1].snap_path);
-    const attractor_synsets = try data.findAttractors(&latest_snapshot, allocator);
-    std.debug.print("Attractors: ", .{});
-    for (attractor_synsets) |a| {
-        std.debug.print("{s} ", .{a});
-    }
-    std.debug.print("\n", .{});
-
-    // K-means on attractors
-    const k: u8 = @intCast(@min(constants.NUM_CLUSTERS, attractor_synsets.len));
-    const attractor_labels = try data.kmeansAttractors(attractor_synsets, &nd.anchors, k, allocator);
-
-    // Store attractor name indices
-    for (attractor_synsets, 0..) |aname, i| {
-        nd.attractor_names[i] = nd.name_to_idx.get(aname) orelse 0;
-    }
-    nd.num_attractors = attractor_synsets.len;
-
-    // Reconstruct recency for each timestamp
-    std.debug.print("Reconstructing recency...\n", .{});
-    const recencies = try data.reconstructRecency(timestamps, &nd);
-
-    // Build keyframes
-    const x_scale: f32 = @as(f32, @floatFromInt(constants.WINDOW_W)) / @as(f32, @floatFromInt(constants.WINDOW_H));
-
-    // Collect loaded timestamps for the worker thread
-    var initial_ts = std.ArrayList([]const u8).init(allocator);
-
-    // Running recency — seeded from replay, then handed to worker
+    // --- Spawn worker thread (handles all snapshot loading + live) ---
     var running_recency = std.StringHashMap(u32).init(allocator);
-
-    std.debug.print("Building keyframes (x_scale={d:.2})...\n", .{x_scale});
-    var prev_snap: ?std.StringHashMap(data.SnapshotEntry) = null;
-    for (timestamps, 0..) |ts_info, ti| {
-        var snapshot = try data.loadSnapshot(&nd, ts_info.snap_path);
-        var delta_map = data.loadDelta(&nd, ts_info.delta_path) catch std.StringHashMap(i64).init(allocator);
-
-        const kf = try data.buildKeyframe(
-            &nd,
-            &snapshot,
-            &delta_map,
-            &recencies[ti],
-            if (prev_snap) |*ps| ps else null,
-            attractor_synsets,
-            attractor_labels,
-            ts_info.timestamp,
-            x_scale,
-        );
-        try nd.keyframes.append(kf);
-
-        std.debug.print("  Keyframe {s}: {d} points, max_delta={d:.0}\n", .{
-            ts_info.timestamp, kf.points.len, kf.max_delta,
-        });
-
-        try initial_ts.append(ts_info.timestamp);
-
-        if (prev_snap) |*ps| ps.deinit();
-        prev_snap = snapshot;
-    }
-
-    // Seed running_recency from the last reconstructed recency
-    if (recencies.len > 0) {
-        var rc_it = recencies[recencies.len - 1].iterator();
-        while (rc_it.next()) |entry| {
-            try running_recency.put(entry.key_ptr.*, entry.value_ptr.*);
-        }
-    }
-
-    latest_snapshot.deinit();
-
-    std.debug.print("Ready! {d} keyframes, {d} names\n", .{
-        nd.keyframes.items.len,
-        nd.synset_names.items.len,
-    });
-
-    // --- Spawn live worker thread ---
     var nds = live.NdSnapshot.init(&nd, &running_recency);
-    var queue = live.LiveQueue{
-        .attractor_synsets = attractor_synsets,
-        .attractor_labels = attractor_labels,
-        .x_scale = x_scale,
-    };
-    queue.spawn(initial_ts.items, &nds);
+    var queue = live.LiveQueue{};
+    queue.spawn(&nds);
     defer queue.requestShutdown();
 
     // --- Raylib init ---
@@ -125,11 +38,10 @@ pub fn main() !void {
 
     const font = rl.getFontDefault();
 
-    // Compute bounds from the last keyframe (has all points)
-    const bounds = camera.computeBounds(nd.keyframes.items[nd.keyframes.items.len - 1].points);
-    var cam_state = camera.CameraState.init(bounds, rl.getScreenWidth(), rl.getScreenHeight());
-    var tl = timeline_mod.Timeline.init(@intCast(nd.keyframes.items.len));
-    try tl.computeTickFracs(nd.keyframes.items, allocator);
+    // Start with default bounds — camera will fit when first data arrives
+    const default_bounds = camera.Bounds{ .min_x = -20, .max_x = 20, .min_y = -20, .max_y = 20 };
+    var cam_state = camera.CameraState.init(default_bounds, rl.getScreenWidth(), rl.getScreenHeight());
+    var tl = timeline_mod.Timeline.init(0);
     var search = ui.SearchState{};
     var cluster_filter = ui.ClusterFilter{};
 
@@ -137,17 +49,27 @@ pub fn main() !void {
     var phys = physics.PhysicsState.init(allocator);
     var phys_buf: ?[]data.Point = null;
     var prev_ki: u32 = std.math.maxInt(u32);
+    var needs_camera_fit = true;
 
     while (!rl.windowShouldClose()) {
         const dt = rl.getFrameTime();
+        const sw = rl.getScreenWidth();
+        const sh = rl.getScreenHeight();
 
         // --- Live reload: check queue (lock-free pop, microseconds) ---
         if (queue.pop()) |result| {
             const was_at_end = tl.wasAtEnd();
 
+            // Update attractor info
+            if (result.num_attractors > 0) {
+                nd.num_attractors = result.num_attractors;
+                for (0..result.num_attractors) |i| {
+                    nd.attractor_names[i] = result.attractor_name_indices[i];
+                }
+            }
+
             // Register any new names the worker discovered
             for (result.new_names.items) |ne| {
-                // Ensure main thread's name table has this entry
                 _ = nd.getOrAddName(ne.synset, ne.word) catch continue;
             }
             // Merge new positions
@@ -159,8 +81,25 @@ pub fn main() !void {
                 }
             }
 
-            // Append the pre-built keyframe
-            nd.keyframes.append(result.keyframe) catch {};
+            // Copy points and timestamp to main-thread allocator so eviction can free them
+            const points_copy = allocator.dupe(data.Point, result.keyframe.points) catch {
+                var r = result;
+                r.deinit();
+                std.heap.page_allocator.destroy(r);
+                continue;
+            };
+            const ts_copy = allocator.dupe(u8, result.keyframe.timestamp) catch {
+                allocator.free(points_copy);
+                var r = result;
+                r.deinit();
+                std.heap.page_allocator.destroy(r);
+                continue;
+            };
+            var kf = result.keyframe;
+            kf.points = points_copy;
+            kf.timestamp = ts_copy;
+
+            nd.keyframes.append(kf) catch {};
 
             // Drop oldest keyframes if over the cap
             while (nd.keyframes.items.len > constants.MAX_KEYFRAMES) {
@@ -174,14 +113,23 @@ pub fn main() !void {
 
             tl.num_keyframes = @intCast(nd.keyframes.items.len);
             tl.computeTickFracs(nd.keyframes.items, allocator) catch {};
-            if (was_at_end) {
+            tl.noteArrival();
+            if (was_at_end or nd.keyframes.items.len == 1) {
                 tl.follow_target = @floatFromInt(tl.num_keyframes - 1);
             }
 
-            // Clean up result (but arena strings survive in nd)
+            // Clean up result (frees arena — we've copied what we need)
             var r = result;
             r.deinit();
             std.heap.page_allocator.destroy(r);
+        }
+
+        // Fit camera when first data arrives
+        if (needs_camera_fit and nd.keyframes.items.len > 0) {
+            const bounds = camera.computeBounds(nd.keyframes.items[nd.keyframes.items.len - 1].points);
+            cam_state.bounds = bounds;
+            cam_state.fitToScreen(sw, sh);
+            needs_camera_fit = false;
         }
 
         // Input
@@ -200,8 +148,21 @@ pub fn main() !void {
         }
         tl.update(dt);
 
-        // Current points
+        // --- Drawing ---
+        rl.beginDrawing();
+        rl.clearBackground(constants.BG_COLOR);
+
         const keyframes = nd.keyframes.items;
+        if (keyframes.len == 0) {
+            // Loading screen
+            rl.drawTextEx(font, "CASSANDRA", rl.vec2(20, 20), 24, 2.0, constants.HUD_COLOR);
+            rl.drawTextEx(font, "WordNet Nucleus Observer", rl.vec2(20, 52), 11, 1.0, constants.HUD_DIM);
+            rl.drawTextEx(font, "Loading snapshots...", rl.vec2(20, 72), 14, 1.0, constants.HUD_DIM);
+            rl.drawFPS(sw - 90, sh - 60);
+            rl.endDrawing();
+            continue;
+        }
+
         const ki = @min(tl.keyframeIndex(), @as(u32, @intCast(keyframes.len - 1)));
         const frac = tl.interpFraction();
 
@@ -251,13 +212,7 @@ pub fn main() !void {
         else
             current_points;
 
-        const sw = rl.getScreenWidth();
-        const sh = rl.getScreenHeight();
         cam_state.update(render_points, sw, sh);
-
-        // --- Drawing ---
-        rl.beginDrawing();
-        rl.clearBackground(constants.BG_COLOR);
 
         rl.beginMode2D(cam_state.cam);
         render.drawGrid(cam_state.cam, sw, sh);
