@@ -57,6 +57,9 @@ pub const LiveQueue = struct {
     nav_request_len: usize = 0,
     nav_request_pending: bool = false,
 
+    // Bootstrap completion signal
+    bootstrap_complete: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
     pub fn pop(self: *LiveQueue) ?*ReadyKeyframe {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -305,6 +308,7 @@ fn workerLoop(
                 snap_wall_time = boot_stmt.columnInt(2);
             } else {
                 bootstrapping = false;
+                queue.bootstrap_complete.store(true, .release);
                 std.debug.print("Worker: bootstrap complete ({d} snapshots)\n", .{boot_count});
                 continue;
             }

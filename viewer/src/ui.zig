@@ -82,11 +82,18 @@ pub fn drawHUD(
     rl.drawTextEx(font, "WordNet Nucleus Observer", rl.vec2(x, y), 11, 1.0, constants.HUD_DIM);
     y += 20;
 
+    // Format YYYYMMDD_HHMMSS → "YYYY-MM-DD  HH:MM"
     var ts_buf: [32]u8 = undefined;
-    const ts_len = @min(timestamp.len, 28);
-    @memcpy(ts_buf[0..2], "T:");
-    @memcpy(ts_buf[2 .. 2 + ts_len], timestamp[0..ts_len]);
-    ts_buf[2 + ts_len] = 0;
+    if (timestamp.len >= 15) {
+        const ts = timestamp;
+        _ = printZ(&ts_buf, "{s}-{s}-{s}  {s}:{s}", .{
+            ts[0..4], ts[4..6], ts[6..8], ts[9..11], ts[11..13],
+        });
+    } else {
+        const ts_len = @min(timestamp.len, 30);
+        @memcpy(ts_buf[0..ts_len], timestamp[0..ts_len]);
+        ts_buf[ts_len] = 0;
+    }
     rl.drawTextEx(font, @ptrCast(&ts_buf), rl.vec2(x, y), size, 1.0, constants.HUD_COLOR);
     y += size + 4;
 

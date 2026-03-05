@@ -42,7 +42,7 @@ pub fn main() !void {
     const default_bounds = camera.Bounds{ .min_x = -20, .max_x = 20, .min_y = -20, .max_y = 20 };
     var cam_state = camera.CameraState.init(default_bounds, rl.getScreenWidth(), rl.getScreenHeight());
     var tl = timeline_mod.Timeline.init();
-    tl.playing = true;
+    tl.live = false; // Don't track latest during bootstrap; start from beginning
     var search = ui.SearchState{};
     var cluster_filter = ui.ClusterFilter{};
 
@@ -126,6 +126,7 @@ pub fn main() !void {
 
             // Time-based eviction: drop keyframes older than the timeline window
             tl.noteArrival(kf.wall_time);
+
             const cutoff = tl.windowStart();
             while (nd.keyframes.items.len > 1) {
                 const oldest = nd.keyframes.items[0];
@@ -141,6 +142,13 @@ pub fn main() !void {
             var r = result;
             r.deinit();
             std.heap.page_allocator.destroy(r);
+        }
+
+        // Start playback from beginning once bootstrap is done
+        if (queue.bootstrap_complete.load(.acquire) and tl.live and tl.earliest_time > 0) {
+            tl.current_time = tl.earliest_time;
+            tl.live = false;
+            tl.playing = true;
         }
 
         // Check for navmesh path updates (separate from keyframe queue)
