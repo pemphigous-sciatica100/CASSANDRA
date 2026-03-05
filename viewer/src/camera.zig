@@ -2,6 +2,7 @@ const rl = @import("rl.zig");
 const constants = @import("constants.zig");
 const data = @import("data.zig");
 const bvh = @import("bvh.zig");
+const ui = @import("ui.zig");
 const std = @import("std");
 
 pub const Bounds = struct {
@@ -67,7 +68,7 @@ pub const CameraState = struct {
         };
     }
 
-    pub fn update(self: *CameraState, points: ?[]const data.Point, sw: c_int, sh: c_int, frame_bvh: ?*const bvh.FrameBvh) void {
+    pub fn update(self: *CameraState, points: ?[]const data.Point, sw: c_int, sh: c_int, frame_bvh: ?*const bvh.FrameBvh, cf: *const ui.ClusterFilter) void {
         self.cam.offset = rl.vec2(@as(f32, @floatFromInt(sw)) / 2.0, @as(f32, @floatFromInt(sh)) / 2.0);
 
         const wheel = rl.getMouseWheelMove();
@@ -87,7 +88,20 @@ pub const CameraState = struct {
             self.dragging = true;
             self.drag_start = rl.getMousePosition();
         }
-        if (rl.isMouseButtonReleased(rl.MOUSE_BUTTON_RIGHT)) {
+        if (rl.isMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
+            const mouse_pos = rl.getMousePosition();
+            if (mouse_pos.y < @as(f32, @floatFromInt(sh)) - 50) {
+                const world_pos = rl.getScreenToWorld2D(mouse_pos, self.cam);
+                const hit = hitTest(world_pos, points, self.cam.zoom, frame_bvh, cf);
+                self.selected_point = hit;
+                // Left-click on empty space starts a drag
+                if (hit == null) {
+                    self.dragging = true;
+                    self.drag_start = mouse_pos;
+                }
+            }
+        }
+        if (rl.isMouseButtonReleased(rl.MOUSE_BUTTON_RIGHT) or rl.isMouseButtonReleased(rl.MOUSE_BUTTON_LEFT)) {
             self.dragging = false;
         }
         if (self.dragging) {
@@ -97,14 +111,6 @@ pub const CameraState = struct {
             self.cam.target.x -= dx;
             self.cam.target.y -= dy;
             self.drag_start = mouse_pos;
-        }
-
-        if (rl.isMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
-            const mouse_pos = rl.getMousePosition();
-            if (mouse_pos.y < @as(f32, @floatFromInt(sh)) - 50) {
-                const world_pos = rl.getScreenToWorld2D(mouse_pos, self.cam);
-                self.selected_point = hitTest(world_pos, points, self.cam.zoom, frame_bvh);
-            }
         }
 
         if (rl.isKeyPressed(rl.KEY_HOME)) {
@@ -118,12 +124,16 @@ pub const CameraState = struct {
     }
 };
 
-fn hitTest(world_pos: rl.Vector2, points: ?[]const data.Point, zoom: f32, frame_bvh: ?*const bvh.FrameBvh) ?u16 {
+fn hitTest(world_pos: rl.Vector2, points: ?[]const data.Point, zoom: f32, frame_bvh: ?*const bvh.FrameBvh, cf: *const ui.ClusterFilter) ?u16 {
     const hit_radius = 15.0 / zoom;
 
-    // Use BVH fast path if available
+    // Use BVH fast path if available, then validate cluster visibility
     if (frame_bvh) |fb| {
-        return fb.nearest(world_pos.x, world_pos.y, hit_radius);
+        const idx = fb.nearest(world_pos.x, world_pos.y, hit_radius) orelse return null;
+        if (points) |pts| {
+            if (idx < pts.len and !cf.isVisible(pts[idx].cluster)) return null;
+        }
+        return idx;
     }
 
     // Fallback: linear scan
@@ -132,6 +142,7 @@ fn hitTest(world_pos: rl.Vector2, points: ?[]const data.Point, zoom: f32, frame_
     var best_idx: ?u16 = null;
 
     for (pts, 0..) |p, i| {
+        if (!cf.isVisible(p.cluster)) continue;
         const dx = world_pos.x - p.x;
         const dy = world_pos.y - p.y;
         const d2 = dx * dx + dy * dy;

@@ -244,7 +244,7 @@ pub fn drawNavmesh(
 ) void {
     for (nav_paths) |path| {
         if (path.len < 2) continue;
-        if (!cf.isVisible(path.cluster_a) and !cf.isVisible(path.cluster_b)) continue;
+        if (!cf.isVisible(path.cluster_a) or !cf.isVisible(path.cluster_b)) continue;
 
         // Must have a focused attractor to show paths
         const f = focus orelse continue;
@@ -297,7 +297,7 @@ pub fn drawNavmesh(
     nav_waypoint_count = 0;
     for (nav_paths) |path| {
         if (path.len < 2) continue;
-        if (!cf.isVisible(path.cluster_a) and !cf.isVisible(path.cluster_b)) continue;
+        if (!cf.isVisible(path.cluster_a) or !cf.isVisible(path.cluster_b)) continue;
         const f = focus orelse continue;
         if (path.nodes[0] != f and path.nodes[path.len - 1] != f) continue;
 

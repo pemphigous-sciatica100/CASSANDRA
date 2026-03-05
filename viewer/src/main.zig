@@ -172,6 +172,15 @@ pub fn main() !void {
             search.handleInput();
             tl.handleInput();
             cluster_filter.handleInput();
+            // Clear selection if its cluster was just hidden
+            if (cam_state.selected_point) |sel| {
+                if (nd.keyframes.items.len > 0) {
+                    const pts = nd.keyframes.items[nd.keyframes.items.len - 1].points;
+                    if (sel < pts.len and !cluster_filter.isVisible(pts[sel].cluster)) {
+                        cam_state.selected_point = null;
+                    }
+                }
+            }
             if (rl.isKeyPressed(rl.KEY_G)) {
                 phys.toggle();
             }
@@ -283,7 +292,7 @@ pub fn main() !void {
         }
         const visible = visible_buf[0..n_visible];
 
-        cam_state.update(render_points, sw, sh, &frame_bvh);
+        cam_state.update(render_points, sw, sh, &frame_bvh, &cluster_filter);
 
         // Update navmesh focus on click: clicking an attractor focuses paths from it
         if (navmesh_on and rl.isMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
@@ -299,6 +308,15 @@ pub fn main() !void {
                 }
             } else {
                 navmesh_focus = null; // clicked empty space
+            }
+        }
+
+        // Auto-focus navmesh on selected attractor (e.g. toggling N with attractor already selected)
+        if (navmesh_on and navmesh_focus == null) {
+            if (cam_state.selected_point) |sel| {
+                if (sel < render_points.len and render_points[sel].is_attractor) {
+                    navmesh_focus = render_points[sel].name_idx;
+                }
             }
         }
 
