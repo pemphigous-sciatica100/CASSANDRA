@@ -26,7 +26,7 @@ pub fn main() !void {
     std.debug.print("Loaded {d} positions\n", .{nd.positions.count()});
 
     // --- Spawn worker thread (handles all snapshot loading + live) ---
-    var running_recency = std.StringHashMap(u32).init(allocator);
+    var running_recency = std.StringHashMap(i64).init(allocator);
     var nds = live.NdSnapshot.init(&nd, &running_recency);
     var queue = live.LiveQueue{};
     queue.spawn(&nds);

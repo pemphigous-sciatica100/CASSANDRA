@@ -74,10 +74,10 @@ pub const NdSnapshot = struct {
     anchors: std.StringHashMap([constants.ANCHOR_DIM]f32),
     name_to_idx: std.StringHashMap(u16),
     next_idx: u16,
-    // Worker's running recency
-    recency: std.StringHashMap(u32),
+    // Worker's running recency: nucleus name → wall-time of last activity (seconds)
+    recency: std.StringHashMap(i64),
 
-    pub fn init(nd: *data.NucleusData, initial_recency: *std.StringHashMap(u32)) NdSnapshot {
+    pub fn init(nd: *data.NucleusData, initial_recency: *std.StringHashMap(i64)) NdSnapshot {
         // These are shallow copies — they share arena-allocated key strings with nd.
         // That's safe because arena strings are never freed individually.
         return .{
@@ -217,27 +217,24 @@ fn workerLoop(
         // Parse delta
         var delta_map = parseDelta(alloc, delta_bytes) catch std.StringHashMap(i64).init(alloc);
 
-        // Update recency
-        var age_it = recency.iterator();
-        while (age_it.next()) |entry| {
-            entry.value_ptr.* += 1;
-        }
+        // Update recency: store wall-time of last activity
+        const wall_time = timeline_mod.parseTimestamp(ts);
         var dk_it = delta_map.iterator();
         while (dk_it.next()) |d_entry| {
             if (!recency.contains(d_entry.key_ptr.*)) {
                 const key = page.dupe(u8, d_entry.key_ptr.*) catch continue;
-                recency.put(key, 0) catch {};
+                recency.put(key, wall_time) catch {};
             } else {
-                recency.put(d_entry.key_ptr.*, 0) catch {};
+                recency.put(d_entry.key_ptr.*, wall_time) catch {};
             }
         }
-        // Evict old
-        const evict_threshold: u32 = @intFromFloat(constants.FADE_WINDOW * 2);
+        // Evict nuclei inactive for > 2x the fade window
+        const evict_threshold: i64 = @intFromFloat(constants.FADE_SECONDS * 2);
         {
             var remove_list = std.ArrayList([]const u8).init(alloc);
             var rm_it = recency.iterator();
             while (rm_it.next()) |entry| {
-                if (entry.value_ptr.* > evict_threshold) {
+                if (wall_time - entry.value_ptr.* > evict_threshold) {
                     remove_list.append(entry.key_ptr.*) catch {};
                 }
             }
@@ -515,7 +512,7 @@ fn buildKeyframeWorker(
     name_to_idx: *const std.StringHashMap(u16),
     snapshot: *std.StringHashMap(data.SnapshotEntry),
     delta: *std.StringHashMap(i64),
-    recency: *std.StringHashMap(u32),
+    recency: *std.StringHashMap(i64),
     prev_snapshot: ?*std.StringHashMap(data.SnapshotEntry),
     attractor_synsets: []const []const u8,
     attractor_labels: []const u8,
@@ -535,10 +532,13 @@ fn buildKeyframeWorker(
         const snap_entry = snapshot.get(name) orelse continue;
         if (snap_entry.update_count == 0) continue;
 
-        const age: u32 = recency.get(name) orelse @as(u32, @intFromFloat(constants.FADE_WINDOW)) + 1;
-        if (@as(f32, @floatFromInt(age)) > constants.FADE_WINDOW) continue;
+        const last_active: i64 = recency.get(name) orelse 0;
+        if (last_active == 0) continue;
+        const wall_time = timeline_mod.parseTimestamp(timestamp);
+        const age_secs: f64 = @floatFromInt(wall_time - last_active);
+        if (age_secs > constants.FADE_SECONDS) continue;
 
-        const fade = 1.0 - (@as(f32, @floatFromInt(age)) / constants.FADE_WINDOW);
+        const fade: f32 = @floatCast(1.0 - (age_secs / constants.FADE_SECONDS));
         const d: f32 = @floatFromInt(delta.get(name) orelse 0);
         const total: f32 = @floatFromInt(snap_entry.update_count);
 

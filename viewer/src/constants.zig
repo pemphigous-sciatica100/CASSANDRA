@@ -1,6 +1,7 @@
 const rl = @import("rl.zig");
 
-pub const FADE_WINDOW: f32 = 12.0;
+/// How long (in seconds) a nucleus stays visible after its last activity.
+pub const FADE_SECONDS: f64 = 24 * 3600; // 24 hours
 pub const NUM_CLUSTERS: u8 = 8;
 pub const NUM_ATTRACTORS: usize = 10;
 pub const ANCHOR_DIM: usize = 50;
