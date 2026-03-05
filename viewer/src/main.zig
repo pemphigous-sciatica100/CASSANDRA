@@ -322,6 +322,9 @@ pub fn main() !void {
 
         // Labels, vignette, and HUD drawn AFTER effects so they stay crisp
         render.drawLabels(render_points, &nd, cam_state.cam, font, &cluster_filter, cur_kf.max_delta, visible);
+        if (navmesh_on and navmesh_focus != null) {
+            render.drawNavmeshLabels(render_points, &nd, cam_state.cam, font);
+        }
         render.drawVignette(sw, sh);
         ui.drawHUD(font, cur_kf.timestamp, cur_kf.num_visible, cur_kf.num_hot, @intCast(keyframes.len), &tl, phys.isActive(), keyframes);
         ui.drawScrubber(&tl, font, sw, sh, keyframes);

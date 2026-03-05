@@ -250,6 +250,15 @@ pub fn drawNavmesh(
         const f = focus orelse continue;
         if (path.nodes[0] != f and path.nodes[path.len - 1] != f) continue;
 
+        // Fade by path length: short paths are bold, long ones are subtle
+        const hops = path.len - 1;
+        // 1 hop → 1.0, 2 → 0.8, 3 → 0.6, 4 → 0.4, 5+ → 0.25
+        const prominence: f32 = if (hops <= 1) 1.0 else if (hops <= 4) 1.0 - @as(f32, @floatFromInt(hops - 1)) * 0.2 else 0.25;
+        const line_alpha: u8 = @intFromFloat(40.0 + 160.0 * prominence);
+        const dot_alpha: u8 = @intFromFloat(60.0 + 180.0 * prominence);
+        const thickness: f32 = 0.04 + 0.12 * prominence;
+        const dot_radius: f32 = 0.04 + 0.10 * prominence;
+
         // Blend color from the two endpoint clusters
         const ca = constants.PALETTE[path.cluster_a % constants.NUM_CLUSTERS];
         const cb = constants.PALETTE[path.cluster_b % constants.NUM_CLUSTERS];
@@ -257,13 +266,13 @@ pub fn drawNavmesh(
             @intCast((@as(u16, ca.r) + @as(u16, cb.r)) / 2),
             @intCast((@as(u16, ca.g) + @as(u16, cb.g)) / 2),
             @intCast((@as(u16, ca.b) + @as(u16, cb.b)) / 2),
-            160,
+            line_alpha,
         );
         const dot_col = rl.color(
             @intCast((@as(u16, ca.r) + @as(u16, cb.r)) / 2),
             @intCast((@as(u16, ca.g) + @as(u16, cb.g)) / 2),
             @intCast((@as(u16, ca.b) + @as(u16, cb.b)) / 2),
-            220,
+            dot_alpha,
         );
 
         // Draw segments
@@ -273,13 +282,56 @@ pub fn drawNavmesh(
             const pos = findPointPos(points, name_idx) orelse continue;
 
             if (prev_pos) |pp| {
-                rl.drawLineEx(pp, pos, 0.12, line_col);
+                rl.drawLineEx(pp, pos, thickness, line_col);
             }
             prev_pos = pos;
 
             // Draw waypoint dot for intermediate nodes
             if (pi > 0 and pi < path.len - 1) {
-                rl.drawCircleV(pos, 0.12, dot_col);
+                rl.drawCircleV(pos, dot_radius, dot_col);
+            }
+        }
+    }
+
+    // Collect waypoint name_idxs (non-attractor intermediates) for labeling
+    nav_waypoint_count = 0;
+    for (nav_paths) |path| {
+        if (path.len < 2) continue;
+        if (!cf.isVisible(path.cluster_a) and !cf.isVisible(path.cluster_b)) continue;
+        const f = focus orelse continue;
+        if (path.nodes[0] != f and path.nodes[path.len - 1] != f) continue;
+
+        for (0..path.len) |pi| {
+            if (pi == 0 or pi == path.len - 1) continue; // skip attractor endpoints
+            if (nav_waypoint_count >= MAX_WAYPOINTS) break;
+            const ni = path.nodes[pi];
+            // Deduplicate
+            var dup = false;
+            for (nav_waypoints[0..nav_waypoint_count]) |existing| {
+                if (existing == ni) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                nav_waypoints[nav_waypoint_count] = ni;
+                nav_waypoint_count += 1;
+            }
+        }
+    }
+}
+
+const MAX_WAYPOINTS = 128;
+var nav_waypoints: [MAX_WAYPOINTS]u16 = undefined;
+var nav_waypoint_count: usize = 0;
+
+pub fn drawNavmeshLabels(points: []const data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, font: rl.Font) void {
+    for (nav_waypoints[0..nav_waypoint_count]) |ni| {
+        // Find point
+        for (points) |p| {
+            if (p.name_idx == ni) {
+                drawOneLabel(p, nd, cam, font, 0.9);
+                break;
             }
         }
     }
