@@ -39,6 +39,11 @@ pub const WorldMap = struct {
     point_region: [MAX_NAMES]?u16 = [_]?u16{null} ** MAX_NAMES,
     last_display_count: usize = 0,
     heat: [MAX_REGIONS]f32 = [_]f32{0} ** MAX_REGIONS,
+    // Spread box per region: center + half-extents of largest polygon (for geo distribution)
+    spread_cx: [MAX_REGIONS]f32 = [_]f32{0} ** MAX_REGIONS,
+    spread_cy: [MAX_REGIONS]f32 = [_]f32{0} ** MAX_REGIONS,
+    spread_hw: [MAX_REGIONS]f32 = [_]f32{0} ** MAX_REGIONS,
+    spread_hh: [MAX_REGIONS]f32 = [_]f32{0} ** MAX_REGIONS,
 
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !WorldMap {
         const file = std.fs.cwd().openFile(path, .{}) catch |err| {
@@ -444,8 +449,34 @@ pub const WorldMap = struct {
             }
         }
 
+        // Precompute spread boxes from largest polygon per region
+        var result: WorldMap = .{ .regions = regions, .buf = buf, .name_to_region = name_to_region };
+        for (regions, 0..) |region, ri| {
+            // Find largest polygon by bounding box area
+            var best_area: f32 = -1;
+            var best_poly: ?Polygon = null;
+            for (region.polygons) |poly| {
+                const a2 = (poly.max_x - poly.min_x) * (poly.max_y - poly.min_y);
+                if (a2 > best_area) {
+                    best_area = a2;
+                    best_poly = poly;
+                }
+            }
+            if (best_poly) |bp| {
+                result.spread_cx[ri] = (bp.min_x + bp.max_x) / 2.0;
+                result.spread_cy[ri] = (bp.min_y + bp.max_y) / 2.0;
+                result.spread_hw[ri] = (bp.max_x - bp.min_x) / 2.0 * 0.8; // 80% of bbox to keep inside borders
+                result.spread_hh[ri] = (bp.max_y - bp.min_y) / 2.0 * 0.8;
+            } else {
+                result.spread_cx[ri] = region.centroid[0];
+                result.spread_cy[ri] = region.centroid[1];
+                result.spread_hw[ri] = 2.0;
+                result.spread_hh[ri] = 2.0;
+            }
+        }
+
         std.debug.print("worldmap: loaded {} regions, {} triangles, {} name mappings\n", .{ num_regions, total_tris, name_to_region.count() });
-        return .{ .regions = regions, .buf = buf, .name_to_region = name_to_region };
+        return result;
     }
 
     /// Handle double-click on regions: hit-test and animated zoom to region bounds.

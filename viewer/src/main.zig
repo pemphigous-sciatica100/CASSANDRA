@@ -286,13 +286,17 @@ pub fn main() !void {
                     }
                 }
             }
-            // Populate geo targets from worldmap
+            // Populate geo targets from worldmap, spread within largest polygon bbox
             if (wmap) |*m| {
                 for (0..phys.count) |i| {
                     const ni = phys.name_indices[i];
                     if (m.point_region[ni]) |ri| {
-                        phys.geo_x[i] = m.regions[ri].centroid[0];
-                        phys.geo_y[i] = m.regions[ri].centroid[1];
+                        // Deterministic spread within country bbox
+                        const seed: u32 = @as(u32, ni) *% 2654435761; // Knuth multiplicative hash
+                        const sx = @as(f32, @floatFromInt(seed & 0xFFFF)) / 65536.0 * 2.0 - 1.0; // -1..1
+                        const sy = @as(f32, @floatFromInt((seed >> 16) & 0xFFFF)) / 65536.0 * 2.0 - 1.0;
+                        phys.geo_x[i] = m.spread_cx[ri] + sx * m.spread_hw[ri];
+                        phys.geo_y[i] = m.spread_cy[ri] + sy * m.spread_hh[ri];
                         phys.has_geo[i] = true;
                     } else {
                         phys.has_geo[i] = false;
