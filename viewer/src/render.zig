@@ -204,7 +204,10 @@ pub fn drawLabels(points: []const data.Point, nd: *const data.NucleusData, cam: 
 fn drawOneLabel(p: data.Point, nd: *const data.NucleusData, cam: rl.Camera2D, font: rl.Font, label_alpha: f32) void {
     const word = nd.displayWord(p.name_idx);
     const is_moving_fast = p.speed > 1.0;
-    const font_size: f32 = if (p.is_attractor) 14.0 else if (is_moving_fast) 11.0 else 10.0;
+    const base_size: f32 = if (p.is_attractor) 15.0 else if (is_moving_fast) 11.0 else 10.0;
+    // Scale with zoom: subtle boost so labels grow when zoomed in
+    const zoom_scale = 1.0 + std.math.clamp((cam.zoom - 1.0) * 0.15, 0.0, 1.5);
+    const font_size: f32 = base_size * zoom_scale;
     const screen_pos = rl.getWorldToScreen2D(rl.vec2(p.x, p.y), cam);
 
     const alpha: u8 = @intFromFloat(@min(255.0, 255.0 * label_alpha));
