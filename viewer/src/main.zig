@@ -210,6 +210,18 @@ pub fn main() !void {
             if (rl.isKeyPressed(rl.KEY_E)) {
                 edges_on = !edges_on;
             }
+            if (rl.isKeyPressed(rl.KEY_M)) {
+                phys.toggleGeo();
+            }
+            // ; / ' adjust geo spring strength
+            if (phys.geo_active) {
+                if (rl.isKeyPressed(rl.KEY_SEMICOLON)) {
+                    phys.consts.geo_spring_k = @max(1.0, phys.consts.geo_spring_k - 2.0);
+                }
+                if (rl.isKeyPressed(rl.KEY_APOSTROPHE)) {
+                    phys.consts.geo_spring_k = @min(100.0, phys.consts.geo_spring_k + 2.0);
+                }
+            }
             // Double-click on land: zoom to region (must run before camera.update)
             if (wmap) |*m| m.handleInput(&cam_state, sw, sh);
         }
@@ -274,8 +286,22 @@ pub fn main() !void {
                     }
                 }
             }
+            // Populate geo targets from worldmap
+            if (wmap) |*m| {
+                for (0..phys.count) |i| {
+                    const ni = phys.name_indices[i];
+                    if (m.point_region[ni]) |ri| {
+                        phys.geo_x[i] = m.regions[ri].centroid[0];
+                        phys.geo_y[i] = m.regions[ri].centroid[1];
+                        phys.has_geo[i] = true;
+                    } else {
+                        phys.has_geo[i] = false;
+                    }
+                }
+            }
             phys.step(dt);
             phys.updateBlend(dt);
+            phys.updateGeo(dt);
 
             if (phys_buf) |buf| allocator.free(buf);
             phys_buf = try allocator.alloc(data.Point, current_points.len);
@@ -283,6 +309,7 @@ pub fn main() !void {
             phys.applyToPoints(phys_buf.?);
         } else {
             phys.updateBlend(dt);
+            phys.updateGeo(dt);
         }
 
         const render_points: []const data.Point = if (phys.isActive())
@@ -424,7 +451,7 @@ pub fn main() !void {
         {
             var fx_buf: [64]u8 = undefined;
             var fx_len: usize = 0;
-            if (fx.trails_on or fx.bloom_on or navmesh_on or !edges_on) {
+            if (fx.trails_on or fx.bloom_on or navmesh_on or !edges_on or phys.geo_active) {
                 @memcpy(fx_buf[0..4], "FX: ");
                 fx_len = 4;
                 if (fx.trails_on) {
@@ -454,6 +481,27 @@ pub fn main() !void {
                     }
                     @memcpy(fx_buf[fx_len..][0..8], "NO EDGES");
                     fx_len += 8;
+                }
+                if (phys.geo_active) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..4], "GEO ");
+                    fx_len += 4;
+                    // Format geo_spring_k as e.g. "6.0"
+                    const k_int: u32 = @intFromFloat(phys.consts.geo_spring_k);
+                    const k_frac: u32 = @intFromFloat((phys.consts.geo_spring_k - @as(f32, @floatFromInt(k_int))) * 10 + 0.5);
+                    if (k_int >= 10) {
+                        fx_buf[fx_len] = '0' + @as(u8, @intCast(k_int / 10));
+                        fx_len += 1;
+                    }
+                    fx_buf[fx_len] = '0' + @as(u8, @intCast(k_int % 10));
+                    fx_len += 1;
+                    fx_buf[fx_len] = '.';
+                    fx_len += 1;
+                    fx_buf[fx_len] = '0' + @as(u8, @intCast(k_frac % 10));
+                    fx_len += 1;
                 }
                 fx_buf[fx_len] = 0;
                 const text: [*:0]const u8 = @ptrCast(&fx_buf);

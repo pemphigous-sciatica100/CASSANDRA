@@ -26,6 +26,7 @@ pub const Constants = struct {
     max_velocity: f32 = 20.0,
     time_scale: f32 = 0.25, // slow-mo: simulation runs at 1/4 real time
     blend_duration: f32 = 1.5,
+    geo_spring_k: f32 = 36.0, // spring constant for geo pull toward country centroids
 };
 
 pub const PhysicsState = struct {
@@ -41,11 +42,16 @@ pub const PhysicsState = struct {
     name_indices: []u16,
     nearest_attractor: []u16,
     is_attractor: []bool,
+    geo_x: []f32,
+    geo_y: []f32,
+    has_geo: []bool,
     count: usize,
     capacity: usize,
 
     mode: PhysicsMode,
     blend_t: f32,
+    geo_strength: f32,
+    geo_active: bool,
     consts: Constants,
 
     pub fn init(allocator: std.mem.Allocator) PhysicsState {
@@ -61,10 +67,15 @@ pub const PhysicsState = struct {
             .name_indices = &.{},
             .nearest_attractor = &.{},
             .is_attractor = &.{},
+            .geo_x = &.{},
+            .geo_y = &.{},
+            .has_geo = &.{},
             .count = 0,
             .capacity = 0,
             .mode = .off,
             .blend_t = 0,
+            .geo_strength = 0,
+            .geo_active = false,
             .consts = .{},
         };
     }
@@ -104,6 +115,9 @@ pub const PhysicsState = struct {
         self.name_indices = try self.allocator.realloc(self.name_indices, new_cap);
         self.nearest_attractor = try self.allocator.realloc(self.nearest_attractor, new_cap);
         self.is_attractor = try self.allocator.realloc(self.is_attractor, new_cap);
+        self.geo_x = try self.allocator.realloc(self.geo_x, new_cap);
+        self.geo_y = try self.allocator.realloc(self.geo_y, new_cap);
+        self.has_geo = try self.allocator.realloc(self.has_geo, new_cap);
         self.capacity = new_cap;
     }
 
@@ -165,6 +179,7 @@ pub const PhysicsState = struct {
         const c = self.consts;
         const dt = raw_dt * c.time_scale;
         const n = self.count;
+        const geo_str = self.geo_strength;
 
         // Find attractor positions (in physics space)
         var att_px: [10]f32 = undefined;
@@ -187,14 +202,27 @@ pub const PhysicsState = struct {
             const inv_act = 1.0 - act;
             const inv_act2 = inv_act * inv_act;
             const inv_act3 = inv_act2 * inv_act2; // (1-act)^4
-            const k = c.anchor_k_hot + (c.anchor_k_cold - c.anchor_k_hot) * inv_act3;
+            const k_base = c.anchor_k_hot + (c.anchor_k_cold - c.anchor_k_hot) * inv_act3;
+            // Weaken anchor for geo-matched nodes when geo is active
+            const k = if (geo_str > 0 and self.has_geo[i]) k_base * (1.0 - geo_str * 0.95) else k_base;
             fx += (self.rest_x[i] - self.pos_x[i]) * k;
             fy += (self.rest_y[i] - self.pos_y[i]) * k;
 
             // 2. Center gravity: spring-to-origin, strength proportional to activity
-            // Force scales with distance so hot nodes far from center get pulled hard
-            fx -= self.pos_x[i] * c.center_gravity * act;
-            fy -= self.pos_y[i] * c.center_gravity * act;
+            // Weaken for geo nodes so they can reach far-flung country positions
+            const cg = if (geo_str > 0 and self.has_geo[i]) c.center_gravity * (1.0 - geo_str) else c.center_gravity;
+            fx -= self.pos_x[i] * cg * act;
+            fy -= self.pos_y[i] * cg * act;
+
+            // 2b. Geo spring: pull geo-matched nodes toward country centroid
+            // Uses raw_dt (not time_scaled dt) so it isn't weakened by slow-mo
+            if (geo_str > 0 and self.has_geo[i]) {
+                const gdx = self.geo_x[i] - self.pos_x[i];
+                const gdy = self.geo_y[i] - self.pos_y[i];
+                const scale = geo_str * (0.3 + 0.7 * act);
+                self.vel_x[i] += c.geo_spring_k * scale * gdx * raw_dt;
+                self.vel_y[i] += c.geo_spring_k * scale * gdy * raw_dt;
+            }
 
             // 3. Attractor-satellite spring
             if (!self.is_attractor[i]) {
@@ -291,6 +319,22 @@ pub const PhysicsState = struct {
                 }
             },
             else => {},
+        }
+    }
+
+    /// Toggle geo-gravity mode.
+    pub fn toggleGeo(self: *PhysicsState) void {
+        self.geo_active = !self.geo_active;
+    }
+
+    /// Lerp geo_strength toward target (0 or 1) over blend_duration.
+    pub fn updateGeo(self: *PhysicsState, dt: f32) void {
+        const target: f32 = if (self.geo_active) 1.0 else 0.0;
+        const rate = dt / self.consts.blend_duration;
+        if (self.geo_strength < target) {
+            self.geo_strength = @min(self.geo_strength + rate, target);
+        } else if (self.geo_strength > target) {
+            self.geo_strength = @max(self.geo_strength - rate, target);
         }
     }
 
