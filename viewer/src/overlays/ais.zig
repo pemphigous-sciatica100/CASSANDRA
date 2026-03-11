@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("../rl.zig");
 const overlay = @import("../overlay.zig");
 const worldmap_mod = @import("../worldmap.zig");
+const photo_mod = @import("../photo.zig");
 
 const MAX_VESSELS: usize = 8192;
 const MAX_LABELS: usize = 200;
@@ -15,6 +16,7 @@ pub const Vessel = struct {
     name: [20]u8 = .{0} ** 20,
     name_len: u8 = 0,
     mmsi: u32 = 0,
+    imo: u32 = 0,
     speed: f32 = 0,
     ship_type: u8 = 0,
 };
@@ -34,6 +36,7 @@ pub const AisOverlay = struct {
     last_fetch_status: enum { idle, ok, err } = .idle,
     source: DataSource = .digitraffic,
     aisstream_key: ?[]const u8 = null,
+    selected_mmsi: u32 = 0, // stable selection across data swaps
 
     pub fn enabled(self: *const AisOverlay) bool {
         return self.active;
@@ -165,7 +168,8 @@ pub const AisOverlay = struct {
         return tag.len;
     }
 
-    pub fn hitTest(self: *const AisOverlay, world_pos: rl.Vector2, max_dist_sq: f32) ?overlay.OverlayItemHit {
+    pub fn hitTest(self: *AisOverlay, world_pos: rl.Vector2, max_dist_sq: f32) ?overlay.OverlayItemHit {
+        self.selected_mmsi = 0; // reset stable selection on new click
         var best_dist: f32 = max_dist_sq;
         var best_idx: ?u16 = null;
         for (self.vessels[0..self.count], 0..) |v, i| {
@@ -183,15 +187,60 @@ pub const AisOverlay = struct {
         return null;
     }
 
-    pub fn drawDetail(self: *const AisOverlay, fctx: *const overlay.FrameContext, item_idx: u16) void {
-        if (item_idx >= self.count) return;
-        const v = self.vessels[item_idx];
+    pub fn drawDetail(self: *AisOverlay, fctx: *const overlay.FrameContext, item_idx: u16) void {
+        // Capture MMSI on first call, then re-resolve by MMSI each frame
+        // so the panel stays stable across data swaps.
+        if (self.selected_mmsi == 0 and item_idx < self.count) {
+            self.selected_mmsi = self.vessels[item_idx].mmsi;
+        }
+        const v = blk: {
+            if (self.selected_mmsi != 0) {
+                for (self.vessels[0..self.count]) |vessel| {
+                    if (vessel.mmsi == self.selected_mmsi) break :blk vessel;
+                }
+            }
+            if (item_idx >= self.count) return;
+            break :blk self.vessels[item_idx];
+        };
         const font = fctx.font;
+        const photo_cache = fctx.photo_cache;
 
         const panel_w: f32 = 260;
-        const panel_h: f32 = 200;
         const panel_x: f32 = @as(f32, @floatFromInt(fctx.sw)) - panel_w - 10;
         const panel_y: f32 = 50;
+        const pad: f32 = 12;
+        const sz: f32 = 14;
+
+        // Request photo by MMSI + IMO
+        const photo_key = photo_mod.PhotoKey{ .vessel = .{ .mmsi = v.mmsi, .imo = v.imo } };
+        photo_cache.requestPhoto(photo_key);
+
+        // Compute content height
+        var content_h: f32 = 0;
+        content_h += 24; // title
+        content_h += 18; // mmsi line
+        content_h += (sz + 4) * 4; // type, speed, course, pos
+
+        // Photo section height
+        var photo_tex: ?rl.c.Texture2D = null;
+        var photo_h: f32 = 0;
+        const photo_state = photo_cache.getState(photo_key);
+        if (photo_state) |state| {
+            switch (state) {
+                .pending => {
+                    photo_h = 20;
+                },
+                .loaded => |tex| {
+                    photo_tex = tex;
+                    const max_w = panel_w - pad * 2;
+                    const scale = max_w / @as(f32, @floatFromInt(tex.width));
+                    photo_h = @as(f32, @floatFromInt(tex.height)) * scale + 8;
+                },
+                .not_found => {},
+            }
+        }
+
+        const panel_h = content_h + photo_h + pad * 2;
 
         rl.drawRectangleRounded(.{
             .x = panel_x,
@@ -200,9 +249,8 @@ pub const AisOverlay = struct {
             .height = panel_h,
         }, 0.05, 8, rl.color(10, 12, 18, 220));
 
-        const x = panel_x + 12;
-        var y: f32 = panel_y + 12;
-        const sz: f32 = 14;
+        const x = panel_x + pad;
+        var y: f32 = panel_y + pad;
 
         // Title: vessel name in ship type color
         const col = shipTypeColor(v.ship_type);
@@ -243,6 +291,31 @@ pub const AisOverlay = struct {
         const ll = worldmap_mod.worldToLatLon(v.x, v.y);
         printZ(&buf, "Pos: {d:.3}, {d:.3}", .{ ll[0], ll[1] });
         rl.drawTextEx(font, @ptrCast(&buf), rl.vec2(x, y), sz, 1.0, rl.color(180, 190, 200, 220));
+        y += sz + 4;
+
+        // Photo
+        if (photo_tex) |tex| {
+            y += 4;
+            const max_w = panel_w - pad * 2;
+            const scale = max_w / @as(f32, @floatFromInt(tex.width));
+            const draw_h = @as(f32, @floatFromInt(tex.height)) * scale;
+            rl.c.DrawTexturePro(
+                tex,
+                .{ .x = 0, .y = 0, .width = @floatFromInt(tex.width), .height = @floatFromInt(tex.height) },
+                .{ .x = x, .y = y, .width = max_w, .height = draw_h },
+                .{ .x = 0, .y = 0 },
+                0,
+                rl.c.WHITE,
+            );
+        } else if (photo_state) |state| {
+            switch (state) {
+                .pending => {
+                    y += 4;
+                    rl.drawTextEx(font, "Loading photo...", rl.vec2(x, y), 11, 1.0, rl.color(100, 110, 120, 180));
+                },
+                else => {},
+            }
+        }
     }
 
     fn workerLoop(self: *AisOverlay) void {
@@ -395,13 +468,15 @@ pub const AisOverlay = struct {
         const msg_obj = root.object.get("Message") orelse return;
         if (msg_obj != .object) return;
 
-        // ShipStaticData message (type 5/24): just update ship_type on existing vessel
+        // ShipStaticData message (type 5/24): update ship_type and IMO on existing vessel
         if (msg_obj.object.get("ShipStaticData")) |ssd| {
             if (ssd == .object) {
                 const st = jsonInt(ssd.object.get("Type"));
-                if (st > 0) {
+                const imo = jsonInt(ssd.object.get("ImoNumber"));
+                if (st > 0 or imo > 0) {
                     if (vessel_map.getPtr(mmsi)) |existing| {
-                        existing.ship_type = @intCast(@min(st, 255));
+                        if (st > 0) existing.ship_type = @intCast(@min(st, 255));
+                        if (imo > 0) existing.imo = imo;
                     }
                 }
             }
@@ -439,6 +514,26 @@ pub const AisOverlay = struct {
         }
 
         vessel_map.put(mmsi, vessel) catch {};
+
+        // Prevent unbounded map growth — if we exceed capacity, the publish
+        // would truncate non-deterministically causing vessels to flicker.
+        // Prune oldest entries (arbitrary eviction via iterator) if too large.
+        if (vessel_map.count() > MAX_VESSELS) {
+            var rm_it = vessel_map.keyIterator();
+            // Remove ~10% to avoid pruning every single message
+            var to_remove: usize = vessel_map.count() - MAX_VESSELS + MAX_VESSELS / 10;
+            var rm_keys: [MAX_VESSELS / 10 + 1]u32 = undefined;
+            var rm_count: usize = 0;
+            while (to_remove > 0 and rm_count < rm_keys.len) : (to_remove -= 1) {
+                if (rm_it.next()) |k| {
+                    rm_keys[rm_count] = k.*;
+                    rm_count += 1;
+                } else break;
+            }
+            for (rm_keys[0..rm_count]) |k| {
+                _ = vessel_map.remove(k);
+            }
+        }
     }
 
     fn publishFromMap(self: *AisOverlay, vessel_map: *std.AutoHashMap(u32, Vessel)) void {
@@ -452,6 +547,13 @@ pub const AisOverlay = struct {
             if (v.ship_type > 0) typed += 1;
             count += 1;
         }
+
+        // Sort by MMSI so array indices are stable across updates (preserves selection)
+        std.mem.sort(Vessel, tmp[0..count], {}, struct {
+            fn cmp(_: void, a: Vessel, b: Vessel) bool {
+                return a.mmsi < b.mmsi;
+            }
+        }.cmp);
 
         std.debug.print("AIS: publishing {d} vessels ({d} with ship_type)\n", .{ count, typed });
 
@@ -553,6 +655,12 @@ pub const AisOverlay = struct {
             tmp[count] = vessel;
             count += 1;
         }
+
+        std.mem.sort(Vessel, tmp[0..count], {}, struct {
+            fn cmp(_: void, a: Vessel, b: Vessel) bool {
+                return a.mmsi < b.mmsi;
+            }
+        }.cmp);
 
         self.mutex.lock();
         defer self.mutex.unlock();

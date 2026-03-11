@@ -16,6 +16,7 @@ const overlay_mod = @import("overlay.zig");
 const perf_mod = @import("perf.zig");
 const adsb = @import("overlays/adsb.zig");
 const ais = @import("overlays/ais.zig");
+const photo_mod = @import("photo.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -108,6 +109,11 @@ pub fn main() !void {
         adsb: adsb.AdsbOverlay = .{},
         ais: ais.AisOverlay = .{},
     }).init();
+
+    var photo_cache: photo_mod.PhotoCache = .{};
+    photo_cache.start();
+    defer photo_cache.shutdown();
+    defer photo_cache.deinit();
 
     var selection: overlay_mod.Selection = .none;
 
@@ -516,10 +522,12 @@ pub fn main() !void {
             .dt = dt,
             .font = font,
             .allocator = allocator,
+            .photo_cache = &photo_cache,
         };
 
         // Update overlay state (drain pending data from worker threads)
         overlays.update(&fctx);
+        photo_cache.processCompleted();
 
         rl.beginMode2D(cam_state.cam);
 

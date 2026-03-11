@@ -2,6 +2,7 @@ const std = @import("std");
 const rl = @import("../rl.zig");
 const overlay = @import("../overlay.zig");
 const worldmap_mod = @import("../worldmap.zig");
+const photo_mod = @import("../photo.zig");
 
 const MAX_AIRCRAFT: usize = 8192;
 const MAX_LABELS: usize = 200;
@@ -33,6 +34,7 @@ pub const AdsbOverlay = struct {
     worker: ?std.Thread = null,
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     last_fetch_status: enum { idle, ok, err } = .idle,
+    selected_icao: [6]u8 = .{0} ** 6, // stable selection across data swaps
 
     pub fn enabled(self: *const AdsbOverlay) bool {
         return self.active;
@@ -155,7 +157,8 @@ pub const AdsbOverlay = struct {
         return pos;
     }
 
-    pub fn hitTest(self: *const AdsbOverlay, world_pos: rl.Vector2, max_dist_sq: f32) ?overlay.OverlayItemHit {
+    pub fn hitTest(self: *AdsbOverlay, world_pos: rl.Vector2, max_dist_sq: f32) ?overlay.OverlayItemHit {
+        self.selected_icao = .{0} ** 6; // reset stable selection on new click
         var best_dist: f32 = max_dist_sq;
         var best_idx: ?u16 = null;
         for (self.aircraft[0..self.count], 0..) |ac, i| {
@@ -174,15 +177,61 @@ pub const AdsbOverlay = struct {
         return null;
     }
 
-    pub fn drawDetail(self: *const AdsbOverlay, fctx: *const overlay.FrameContext, item_idx: u16) void {
-        if (item_idx >= self.count) return;
-        const ac = self.aircraft[item_idx];
+    pub fn drawDetail(self: *AdsbOverlay, fctx: *const overlay.FrameContext, item_idx: u16) void {
+        // Capture ICAO on first call, then re-resolve each frame
+        // so the panel stays stable across data swaps.
+        const zero_icao = [_]u8{0} ** 6;
+        if (std.mem.eql(u8, &self.selected_icao, &zero_icao) and item_idx < self.count) {
+            self.selected_icao = self.aircraft[item_idx].icao;
+        }
+        const ac = blk: {
+            if (!std.mem.eql(u8, &self.selected_icao, &zero_icao)) {
+                for (self.aircraft[0..self.count]) |aircraft| {
+                    if (std.mem.eql(u8, &aircraft.icao, &self.selected_icao)) break :blk aircraft;
+                }
+            }
+            if (item_idx >= self.count) return;
+            break :blk self.aircraft[item_idx];
+        };
         const font = fctx.font;
+        const photo_cache = fctx.photo_cache;
 
         const panel_w: f32 = 260;
-        const panel_h: f32 = 200;
         const panel_x: f32 = @as(f32, @floatFromInt(fctx.sw)) - panel_w - 10;
         const panel_y: f32 = 50;
+        const pad: f32 = 12;
+        const sz: f32 = 14;
+
+        // Request photo by ICAO hex
+        const photo_key = photo_mod.PhotoKey{ .icao = ac.icao };
+        photo_cache.requestPhoto(photo_key);
+
+        // Compute content height to size panel dynamically
+        var content_h: f32 = 0;
+        content_h += 24; // title
+        if (ac.icao_len > 0) content_h += 18; // icao line
+        content_h += (sz + 4) * 4; // alt, speed, heading, pos
+
+        // Photo section height
+        var photo_tex: ?rl.c.Texture2D = null;
+        var photo_h: f32 = 0;
+        const photo_state = photo_cache.getState(photo_key);
+        if (photo_state) |state| {
+            switch (state) {
+                .pending => {
+                    photo_h = 20; // "Loading photo..." text
+                },
+                .loaded => |tex| {
+                    photo_tex = tex;
+                    const max_w = panel_w - pad * 2;
+                    const scale = max_w / @as(f32, @floatFromInt(tex.width));
+                    photo_h = @as(f32, @floatFromInt(tex.height)) * scale + 8; // 8px gap
+                },
+                .not_found => {},
+            }
+        }
+
+        const panel_h = content_h + photo_h + pad * 2;
 
         rl.drawRectangleRounded(.{
             .x = panel_x,
@@ -191,9 +240,8 @@ pub const AdsbOverlay = struct {
             .height = panel_h,
         }, 0.05, 8, rl.color(10, 12, 18, 220));
 
-        const x = panel_x + 12;
-        var y: f32 = panel_y + 12;
-        const sz: f32 = 14;
+        const x = panel_x + pad;
+        var y: f32 = panel_y + pad;
 
         // Title: callsign in altitude color
         const col = altitudeColor(ac.altitude);
@@ -239,6 +287,31 @@ pub const AdsbOverlay = struct {
         const ll = worldmap_mod.worldToLatLon(ac.x, ac.y);
         printZ(&buf, "Pos: {d:.3}, {d:.3}", .{ ll[0], ll[1] });
         rl.drawTextEx(font, @ptrCast(&buf), rl.vec2(x, y), sz, 1.0, rl.color(180, 190, 200, 220));
+        y += sz + 4;
+
+        // Photo
+        if (photo_tex) |tex| {
+            y += 4; // gap
+            const max_w = panel_w - pad * 2;
+            const scale = max_w / @as(f32, @floatFromInt(tex.width));
+            const draw_h = @as(f32, @floatFromInt(tex.height)) * scale;
+            rl.c.DrawTexturePro(
+                tex,
+                .{ .x = 0, .y = 0, .width = @floatFromInt(tex.width), .height = @floatFromInt(tex.height) },
+                .{ .x = x, .y = y, .width = max_w, .height = draw_h },
+                .{ .x = 0, .y = 0 },
+                0,
+                rl.c.WHITE,
+            );
+        } else if (photo_state) |state| {
+            switch (state) {
+                .pending => {
+                    y += 4;
+                    rl.drawTextEx(font, "Loading photo...", rl.vec2(x, y), 11, 1.0, rl.color(100, 110, 120, 180));
+                },
+                else => {},
+            }
+        }
     }
 
     fn workerLoop(self: *AdsbOverlay) void {
@@ -387,6 +460,13 @@ pub const AdsbOverlay = struct {
             tmp[count] = ac;
             count += 1;
         }
+
+        // Sort by ICAO so array indices are stable across updates (preserves selection)
+        std.mem.sort(Aircraft, tmp[0..count], {}, struct {
+            fn cmp(_: void, a: Aircraft, b: Aircraft) bool {
+                return std.mem.order(u8, &a.icao, &b.icao) == .lt;
+            }
+        }.cmp);
 
         // Publish
         self.mutex.lock();
