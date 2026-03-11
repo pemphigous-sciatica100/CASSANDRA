@@ -4,6 +4,7 @@ const overlay = @import("../overlay.zig");
 const worldmap_mod = @import("../worldmap.zig");
 
 const MAX_AIRCRAFT: usize = 8192;
+const MAX_LABELS: usize = 200;
 const POLL_INTERVAL_NS: u64 = 10 * std.time.ns_per_s;
 const DOT_COLOR = rl.color(255, 220, 50, 200); // yellow
 const LABEL_COLOR = rl.color(255, 220, 50, 140);
@@ -61,33 +62,86 @@ pub const AdsbOverlay = struct {
         for (self.aircraft[0..self.count]) |ac| {
             if (ac.on_ground) continue;
             const pos = rl.vec2(ac.x, ac.y);
-            rl.drawCircleV(pos, 0.06, DOT_COLOR);
+            rl.drawCircleV(pos, 0.03, DOT_COLOR);
 
             // Heading indicator
             if (ac.heading != 0) {
                 const rad = (ac.heading - 90.0) * std.math.pi / 180.0;
-                const len: f32 = 0.2;
+                const len: f32 = 0.1;
                 const end = rl.vec2(ac.x + @cos(rad) * len, ac.y + @sin(rad) * len);
-                rl.drawLineEx(pos, end, 0.03, HEADING_COLOR);
+                rl.drawLineEx(pos, end, 0.015, HEADING_COLOR);
             }
         }
     }
 
     pub fn drawScreen(self: *AdsbOverlay, fctx: *const overlay.FrameContext) void {
-        // Draw callsign labels for aircraft near center of screen
         const cam = fctx.cam;
-        for (self.aircraft[0..self.count]) |ac| {
+        const sw_f: f32 = @floatFromInt(fctx.sw);
+        const sh_f: f32 = @floatFromInt(fctx.sh);
+        const margin: f32 = 50;
+
+        const budget = acLabelBudget(cam.zoom);
+        const imp_thresh = acLabelThreshold(cam.zoom);
+        if (budget == 0) return;
+
+        // Pass 1: collect top-K labels by importance (viewport-culled)
+        const LabelSlot = struct { idx: u16, importance: f32, screen_x: f32, screen_y: f32 };
+        var slots: [MAX_LABELS]LabelSlot = undefined;
+        var n_slots: usize = 0;
+        var min_imp: f32 = 0;
+        var min_idx: usize = 0;
+
+        for (self.aircraft[0..self.count], 0..) |ac, i| {
             if (ac.on_ground or ac.callsign_len == 0) continue;
-            if (cam.zoom < 2.0) continue; // only show labels when zoomed in
-
             const screen = rl.getWorldToScreen2D(rl.vec2(ac.x, ac.y), cam);
-            if (screen.x < 0 or screen.y < 0) continue;
-            if (screen.x > @as(f32, @floatFromInt(fctx.sw)) or screen.y > @as(f32, @floatFromInt(fctx.sh))) continue;
+            if (screen.x < -margin or screen.x > sw_f + margin or screen.y < -margin or screen.y > sh_f + margin) continue;
 
+            const imp = acImportance(ac, cam.zoom);
+            if (imp < imp_thresh) continue;
+
+            if (n_slots < budget) {
+                slots[n_slots] = .{ .idx = @intCast(i), .importance = imp, .screen_x = screen.x, .screen_y = screen.y };
+                n_slots += 1;
+                if (n_slots == budget) {
+                    min_imp = slots[0].importance;
+                    min_idx = 0;
+                    for (0..n_slots) |j| {
+                        if (slots[j].importance < min_imp) {
+                            min_imp = slots[j].importance;
+                            min_idx = j;
+                        }
+                    }
+                }
+            } else if (imp > min_imp) {
+                slots[min_idx] = .{ .idx = @intCast(i), .importance = imp, .screen_x = screen.x, .screen_y = screen.y };
+                min_imp = slots[0].importance;
+                min_idx = 0;
+                for (0..budget) |j| {
+                    if (slots[j].importance < min_imp) {
+                        min_imp = slots[j].importance;
+                        min_idx = j;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: draw budgeted labels with alpha fade
+        const threshold: f32 = if (n_slots == budget) min_imp else imp_thresh;
+        const zoom_scale = 1.0 + std.math.clamp((cam.zoom - 2.0) * 0.08, 0.0, 1.0);
+        const font_size: f32 = 9.0 * zoom_scale;
+
+        for (slots[0..n_slots]) |slot| {
+            const above = slot.importance - threshold;
+            const range: f32 = 0.5;
+            const alpha = std.math.clamp(above / (range * 0.3), 0.15, 1.0);
+            const a: u8 = @intFromFloat(alpha * 255.0);
+            const col = rl.color(LABEL_COLOR.r, LABEL_COLOR.g, LABEL_COLOR.b, a);
+
+            const ac = self.aircraft[slot.idx];
             var label_buf: [9:0]u8 = undefined;
             @memcpy(label_buf[0..ac.callsign_len], ac.callsign[0..ac.callsign_len]);
             label_buf[ac.callsign_len] = 0;
-            rl.drawTextEx(fctx.font, &label_buf, rl.vec2(screen.x + 5, screen.y - 5), 9, 1.0, LABEL_COLOR);
+            rl.drawTextEx(fctx.font, &label_buf, rl.vec2(slot.screen_x + 5, slot.screen_y - 5), font_size, 1.0, col);
         }
     }
 
@@ -231,6 +285,28 @@ pub const AdsbOverlay = struct {
         std.debug.print("ADSB: parsed {d} aircraft\n", .{count});
     }
 };
+
+/// Aircraft importance: altitude-based (high-altitude = more visible) + zoom reveal.
+fn acImportance(ac: Aircraft, zoom: f32) f32 {
+    const alt_norm = std.math.clamp(ac.altitude / 12000.0, 0.0, 1.0); // 0-12km
+    const spd_norm = std.math.clamp(ac.velocity / 300.0, 0.0, 1.0); // 0-300 m/s
+    const zoom_reveal = std.math.clamp((zoom - 40.0) / 100.0, 0.0, 1.0);
+    return @max(alt_norm * 0.6 + spd_norm * 0.4, zoom_reveal);
+}
+
+/// Label budget: 0 below zoom 30, ramps to MAX_LABELS at deep zoom.
+fn acLabelBudget(zoom: f32) usize {
+    if (zoom < 30.0) return 0;
+    const t = std.math.clamp((zoom - 30.0) / 60.0, 0.0, 1.0);
+    const t2 = std.math.clamp((zoom - 80.0) / 200.0, 0.0, 1.0);
+    return @intFromFloat(6.0 + 44.0 * t + @as(f32, MAX_LABELS - 50) * t2);
+}
+
+/// Threshold: stricter when zoomed out, relaxes as you zoom in.
+fn acLabelThreshold(zoom: f32) f32 {
+    const t = std.math.clamp((zoom - 30.0) / 100.0, 0.0, 1.0);
+    return 0.5 - 0.5 * t;
+}
 
 fn jsonFloat(val: std.json.Value) f64 {
     return switch (val) {
