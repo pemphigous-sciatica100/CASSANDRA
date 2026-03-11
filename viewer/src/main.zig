@@ -618,6 +618,7 @@ pub fn main() !void {
         overlays.drawScreen(&fctx);
 
         render.drawVignette(sw, sh);
+        if (wmap) |*m| m.drawSelectedHeading(font, sw);
         ui.drawHUD(font, cur_kf.timestamp, cur_kf.num_visible, cur_kf.num_hot, @intCast(keyframes.len), &tl, phys.isActive(), keyframes);
         ui.drawScrubber(&tl, font, sw, sh, keyframes);
         ui.drawClusterFilter(&cluster_filter, sw);

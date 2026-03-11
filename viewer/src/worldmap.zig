@@ -771,6 +771,35 @@ pub const WorldMap = struct {
         }
     }
 
+    /// Draw the selected region name as a large heading at top center with drop shadow.
+    pub fn drawSelectedHeading(self: *const WorldMap, font: rl.Font, sw: c_int) void {
+        const sel = self.selected orelse return;
+        const region = self.regions[sel];
+        if (region.name.len == 0) return;
+
+        // Uppercase the name into a null-terminated buffer
+        var name_buf: [64]u8 = undefined;
+        const len = @min(region.name.len, 63);
+        for (region.name[0..len], 0..) |ch, i| {
+            name_buf[i] = if (ch >= 'a' and ch <= 'z') ch - 32 else ch;
+        }
+        name_buf[len] = 0;
+        const name_z: [*:0]const u8 = @ptrCast(&name_buf);
+
+        const font_size: f32 = 28.0;
+        const spacing: f32 = 2.0;
+        const text_w = rl.c.MeasureTextEx(font, name_z, font_size, spacing).x;
+        const x = (@as(f32, @floatFromInt(sw)) - text_w) / 2.0;
+        const y: f32 = 18.0;
+
+        // Drop shadow
+        const shadow = rl.color(0, 0, 0, 160);
+        rl.drawTextEx(font, name_z, rl.vec2(x + 2, y + 2), font_size, spacing, shadow);
+        // Main text
+        const col = rl.color(200, 220, 255, 220);
+        rl.drawTextEx(font, name_z, rl.vec2(x, y), font_size, spacing, col);
+    }
+
     /// Ray-casting point-in-polygon, returns region index.
     fn hitTest(self: *const WorldMap, wx: f32, wy: f32) ?usize {
         for (self.regions, 0..) |region, ri| {
