@@ -78,7 +78,7 @@ pub const CameraState = struct {
         };
     }
 
-    const MAX_ZOOM: f32 = 500.0;
+    const MAX_ZOOM: f32 = 2000.0;
     const MIN_ZOOM: f32 = 2.0;
     const ANIM_DURATION: f32 = 1.0; // seconds
 
