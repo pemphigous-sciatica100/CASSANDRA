@@ -1,5 +1,6 @@
 const std = @import("std");
 const rl = @import("rl.zig");
+const overlay_db_mod = @import("overlay_db.zig");
 
 const MAX_CACHE: usize = 128;
 const MAX_QUEUE: usize = 8;
@@ -67,6 +68,7 @@ pub const PhotoCache = struct {
     mutex: std.Thread.Mutex = .{},
     worker: ?std.Thread = null,
     shutdown_flag: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    overlay_db: ?*overlay_db_mod.OverlayDb = null,
 
     pub fn start(self: *PhotoCache) void {
         self.worker = std.Thread.spawn(.{}, workerLoop, .{self}) catch null;
@@ -219,10 +221,35 @@ pub const PhotoCache = struct {
             for (keys[0..n]) |key| {
                 if (self.shutdown_flag.load(.acquire)) break;
 
-                const image_bytes = switch (key) {
-                    .icao => |icao| fetchAircraftPhoto(&client, &icao),
-                    .vessel => |vid| fetchVesselPhoto(&client, vid.mmsi, vid.imo),
-                };
+                // Build DB key string
+                var key_buf: [32]u8 = undefined;
+                const key_str = photoKeyStr(key, &key_buf);
+
+                // Check DB cache first
+                var image_bytes: ?[]u8 = null;
+                if (self.overlay_db) |db| {
+                    if (db.getPhoto(key_str)) |cached| {
+                        std.debug.print("PHOTO: cache hit for {s}\n", .{key_str});
+                        image_bytes = cached.bytes;
+                        std.heap.page_allocator.free(cached.format);
+                    }
+                }
+
+                // Network fetch if not in DB
+                if (image_bytes == null) {
+                    image_bytes = switch (key) {
+                        .icao => |icao| fetchAircraftPhoto(&client, &icao),
+                        .vessel => |vid| fetchVesselPhoto(&client, vid.mmsi, vid.imo),
+                    };
+
+                    // Save to DB on successful fetch
+                    if (image_bytes) |bytes| {
+                        if (self.overlay_db) |db| {
+                            const fmt = detectFormatSlice(bytes);
+                            db.putPhoto(key_str, fmt, bytes);
+                        }
+                    }
+                }
 
                 // Push response
                 self.mutex.lock();
@@ -476,6 +503,32 @@ fn resolveWikimediaUrl(client: *std.http.Client, raw_url: []const u8, user_agent
 // ---------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------
+
+/// Encode a PhotoKey as a DB key string: "v:MMSI" or "a:ICAO"
+fn photoKeyStr(key: PhotoKey, buf: *[32]u8) []const u8 {
+    switch (key) {
+        .vessel => |vid| {
+            const result = std.fmt.bufPrint(buf, "v:{d}", .{vid.mmsi}) catch return buf[0..0];
+            return result;
+        },
+        .icao => |icao| {
+            var icao_len: usize = 6;
+            while (icao_len > 0 and icao[icao_len - 1] == 0) icao_len -= 1;
+            buf[0] = 'a';
+            buf[1] = ':';
+            @memcpy(buf[2..][0..icao_len], icao[0..icao_len]);
+            return buf[0 .. 2 + icao_len];
+        },
+    }
+}
+
+/// Detect image format, returns a slice (not sentinel-terminated)
+fn detectFormatSlice(bytes: []const u8) []const u8 {
+    if (bytes.len >= 2 and bytes[0] == 0xFF and bytes[1] == 0xD8) return ".jpg";
+    if (bytes.len >= 4 and bytes[0] == 0x89 and bytes[1] == 0x50 and bytes[2] == 0x4E and bytes[3] == 0x47) return ".png";
+    if (bytes.len >= 4 and bytes[0] == 'R' and bytes[1] == 'I' and bytes[2] == 'F' and bytes[3] == 'F') return ".webp";
+    return ".jpg";
+}
 
 fn detectFormat(bytes: []const u8) [*:0]const u8 {
     if (bytes.len >= 2 and bytes[0] == 0xFF and bytes[1] == 0xD8) return ".jpg";

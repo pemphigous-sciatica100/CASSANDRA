@@ -17,6 +17,7 @@ const perf_mod = @import("perf.zig");
 const adsb = @import("overlays/adsb.zig");
 const ais = @import("overlays/ais.zig");
 const photo_mod = @import("photo.zig");
+const overlay_db_mod = @import("overlay_db.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -104,13 +105,32 @@ pub fn main() !void {
     var fx: effects.Effects = .{};
     defer fx.deinit();
 
+    // Overlay persistence DB
+    var overlay_db = overlay_db_mod.OverlayDb.open("overlay.db");
+    defer if (overlay_db) |*db| db.close();
+
     // Overlay plugins
     var overlays = overlay_mod.OverlaySet(struct {
         adsb: adsb.AdsbOverlay = .{},
         ais: ais.AisOverlay = .{},
     }).init();
 
+    // Pass DB handle to overlays so workers can persist data
+    if (overlay_db) |*db| {
+        overlays.overlays.ais.overlay_db = db;
+        overlays.overlays.adsb.overlay_db = db;
+    }
+
+    // Load persisted overlay data immediately (before workers start)
+    if (overlay_db) |*db| {
+        const vc = db.loadAllVessels(&overlays.overlays.ais.vessels);
+        overlays.overlays.ais.count = vc;
+        const ac = db.loadAllAircraft(&overlays.overlays.adsb.aircraft);
+        overlays.overlays.adsb.count = ac;
+    }
+
     var photo_cache: photo_mod.PhotoCache = .{};
+    if (overlay_db) |*db| photo_cache.overlay_db = db;
     photo_cache.start();
     defer photo_cache.shutdown();
     defer photo_cache.deinit();
@@ -523,6 +543,7 @@ pub fn main() !void {
             .font = font,
             .allocator = allocator,
             .photo_cache = &photo_cache,
+            .overlay_db = if (overlay_db) |*db| db else null,
         };
 
         // Update overlay state (drain pending data from worker threads)

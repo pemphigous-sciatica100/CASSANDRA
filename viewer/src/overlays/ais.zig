@@ -3,8 +3,9 @@ const rl = @import("../rl.zig");
 const overlay = @import("../overlay.zig");
 const worldmap_mod = @import("../worldmap.zig");
 const photo_mod = @import("../photo.zig");
+const overlay_db_mod = @import("../overlay_db.zig");
 
-const MAX_VESSELS: usize = 8192;
+const MAX_VESSELS: usize = 32768;
 const MAX_LABELS: usize = 200;
 const POLL_INTERVAL_NS: u64 = 60 * std.time.ns_per_s;
 const HEADING_ALPHA: u8 = 100;
@@ -37,6 +38,7 @@ pub const AisOverlay = struct {
     source: DataSource = .digitraffic,
     aisstream_key: ?[]const u8 = null,
     selected_mmsi: u32 = 0, // stable selection across data swaps
+    overlay_db: ?*overlay_db_mod.OverlayDb = null,
 
     pub fn enabled(self: *const AisOverlay) bool {
         return self.active;
@@ -198,6 +200,8 @@ pub const AisOverlay = struct {
                 for (self.vessels[0..self.count]) |vessel| {
                     if (vessel.mmsi == self.selected_mmsi) break :blk vessel;
                 }
+                // Vessel was pruned — don't fall back to a random one
+                return;
             }
             if (item_idx >= self.count) return;
             break :blk self.vessels[item_idx];
@@ -421,6 +425,18 @@ pub const AisOverlay = struct {
         // Accumulate vessels, publish every ~2s
         var vessel_map = std.AutoHashMap(u32, Vessel).init(std.heap.page_allocator);
         defer vessel_map.deinit();
+
+        // Seed HashMap from DB-loaded vessels (already in self.vessels from startup)
+        {
+            self.mutex.lock();
+            const preloaded = self.count;
+            self.mutex.unlock();
+            for (self.vessels[0..preloaded]) |v| {
+                if (v.mmsi > 0) vessel_map.put(v.mmsi, v) catch {};
+            }
+            if (preloaded > 0) std.debug.print("AIS: seeded HashMap with {d} vessels from DB\n", .{preloaded});
+        }
+
         var last_publish = std.time.milliTimestamp();
 
         // Read WebSocket messages
@@ -450,7 +466,6 @@ pub const AisOverlay = struct {
     }
 
     fn parseAisStreamMsg(self: *AisOverlay, msg: []const u8, vessel_map: *std.AutoHashMap(u32, Vessel)) void {
-        _ = self;
         var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, msg, .{}) catch return;
         defer parsed.deinit();
 
@@ -515,25 +530,8 @@ pub const AisOverlay = struct {
 
         vessel_map.put(mmsi, vessel) catch {};
 
-        // Prevent unbounded map growth — if we exceed capacity, the publish
-        // would truncate non-deterministically causing vessels to flicker.
-        // Prune oldest entries (arbitrary eviction via iterator) if too large.
-        if (vessel_map.count() > MAX_VESSELS) {
-            var rm_it = vessel_map.keyIterator();
-            // Remove ~10% to avoid pruning every single message
-            var to_remove: usize = vessel_map.count() - MAX_VESSELS + MAX_VESSELS / 10;
-            var rm_keys: [MAX_VESSELS / 10 + 1]u32 = undefined;
-            var rm_count: usize = 0;
-            while (to_remove > 0 and rm_count < rm_keys.len) : (to_remove -= 1) {
-                if (rm_it.next()) |k| {
-                    rm_keys[rm_count] = k.*;
-                    rm_count += 1;
-                } else break;
-            }
-            for (rm_keys[0..rm_count]) |k| {
-                _ = vessel_map.remove(k);
-            }
-        }
+        // Persist to DB
+        if (self.overlay_db) |db| db.upsertVessel(vessel);
     }
 
     fn publishFromMap(self: *AisOverlay, vessel_map: *std.AutoHashMap(u32, Vessel)) void {

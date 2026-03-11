@@ -4,6 +4,7 @@ const rl = @import("rl.zig");
 const ui = @import("ui.zig");
 const worldmap_mod = @import("worldmap.zig");
 const photo_mod = @import("photo.zig");
+const overlay_db_mod = @import("overlay_db.zig");
 
 pub const OverlayItemHit = struct { item_idx: u16, dist_sq: f32 };
 pub const OverlayHit = struct { overlay_idx: u8, item_idx: u16, dist_sq: f32 };
@@ -24,6 +25,7 @@ pub const FrameContext = struct {
     font: rl.Font,
     allocator: std.mem.Allocator,
     photo_cache: *photo_mod.PhotoCache,
+    overlay_db: ?*overlay_db_mod.OverlayDb,
 };
 
 /// Comptime generic dispatcher over a tuple of overlay structs.

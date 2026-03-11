@@ -3,6 +3,7 @@ const rl = @import("../rl.zig");
 const overlay = @import("../overlay.zig");
 const worldmap_mod = @import("../worldmap.zig");
 const photo_mod = @import("../photo.zig");
+const overlay_db_mod = @import("../overlay_db.zig");
 
 const MAX_AIRCRAFT: usize = 8192;
 const MAX_LABELS: usize = 200;
@@ -35,6 +36,7 @@ pub const AdsbOverlay = struct {
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     last_fetch_status: enum { idle, ok, err } = .idle,
     selected_icao: [6]u8 = .{0} ** 6, // stable selection across data swaps
+    overlay_db: ?*overlay_db_mod.OverlayDb = null,
 
     pub fn enabled(self: *const AdsbOverlay) bool {
         return self.active;
@@ -189,6 +191,7 @@ pub const AdsbOverlay = struct {
                 for (self.aircraft[0..self.count]) |aircraft| {
                     if (std.mem.eql(u8, &aircraft.icao, &self.selected_icao)) break :blk aircraft;
                 }
+                return;
             }
             if (item_idx >= self.count) return;
             break :blk self.aircraft[item_idx];
@@ -467,6 +470,9 @@ pub const AdsbOverlay = struct {
                 return std.mem.order(u8, &a.icao, &b.icao) == .lt;
             }
         }.cmp);
+
+        // Persist to DB
+        if (self.overlay_db) |db| db.upsertAircraftBatch(tmp[0..count]);
 
         // Publish
         self.mutex.lock();
