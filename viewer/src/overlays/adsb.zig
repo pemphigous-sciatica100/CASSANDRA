@@ -37,6 +37,7 @@ pub const AdsbOverlay = struct {
     last_fetch_status: enum { idle, ok, err } = .idle,
     selected_icao: [6]u8 = .{0} ** 6, // stable selection across data swaps
     overlay_db: ?*overlay_db_mod.OverlayDb = null,
+    visible: [MAX_AIRCRAFT]bool = .{false} ** MAX_AIRCRAFT,
 
     pub fn enabled(self: *const AdsbOverlay) bool {
         return self.active;
@@ -75,7 +76,9 @@ pub const AdsbOverlay = struct {
         const origin_x = @floor(tl.x / cell_world) * cell_world;
         const origin_y = @floor(tl.y / cell_world) * cell_world;
 
-        for (self.aircraft[0..self.count]) |ac| {
+        @memset(self.visible[0..self.count], false);
+
+        for (self.aircraft[0..self.count], 0..) |ac, ai| {
             if (ac.on_ground) continue;
 
             const gx: usize = @intFromFloat(std.math.clamp((ac.x - origin_x) / cell_world, 0, @as(f32, grid_cols - 1)));
@@ -83,6 +86,7 @@ pub const AdsbOverlay = struct {
             const gi = gy * grid_cols + gx;
             if (grid[gi]) continue;
             grid[gi] = true;
+            self.visible[ai] = true;
 
             const pos = rl.vec2(ac.x, ac.y);
             const col = altitudeColor(ac.altitude);
@@ -208,6 +212,7 @@ pub const AdsbOverlay = struct {
         var best_idx: ?u16 = null;
         for (self.aircraft[0..self.count], 0..) |ac, i| {
             if (ac.on_ground) continue;
+            if (!self.visible[i]) continue;
             const dx = world_pos.x - ac.x;
             const dy = world_pos.y - ac.y;
             const d2 = dx * dx + dy * dy;

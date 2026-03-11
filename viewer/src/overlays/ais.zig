@@ -39,6 +39,7 @@ pub const AisOverlay = struct {
     aisstream_key: ?[]const u8 = null,
     selected_mmsi: u32 = 0, // stable selection across data swaps
     overlay_db: ?*overlay_db_mod.OverlayDb = null,
+    visible: [MAX_VESSELS]bool = .{false} ** MAX_VESSELS, // set by drawWorld for hit testing
 
     pub fn enabled(self: *const AisOverlay) bool {
         return self.active;
@@ -86,24 +87,42 @@ pub const AisOverlay = struct {
         const origin_x = @floor(tl.x / cell_world) * cell_world;
         const origin_y = @floor(tl.y / cell_world) * cell_world;
 
-        for (self.vessels[0..self.count]) |v| {
+        @memset(self.visible[0..self.count], false);
+
+        for (self.vessels[0..self.count], 0..) |v, vi| {
             const gx: usize = @intFromFloat(std.math.clamp((v.x - origin_x) / cell_world, 0, @as(f32, grid_cols - 1)));
             const gy: usize = @intFromFloat(std.math.clamp((v.y - origin_y) / cell_world, 0, @as(f32, grid_rows - 1)));
             const gi = gy * grid_cols + gx;
             if (grid[gi]) continue;
             grid[gi] = true;
+            self.visible[vi] = true;
 
             const col = shipTypeColor(v.ship_type);
-            const s: f32 = 0.06;
 
-            // Rotate triangle to point along course (0° = north, CW)
+            // Narrow arrowhead centred on (v.x, v.y)
+            // Local coords (before rotation), centroid at origin:
+            //   tip = (0, -0.02), tail-left = (-0.008, +0.01), tail-right = (+0.008, +0.01)
+            const tip_y: f32 = -0.02;
+            const tail_y: f32 = 0.01;
+            const hw: f32 = 0.008;
+
             const rad = v.course * std.math.pi / 180.0;
             const cos_r = @cos(rad);
             const sin_r = @sin(rad);
 
-            const tip = rl.vec2(v.x + (0) * cos_r - (-s) * sin_r, v.y + (0) * sin_r + (-s) * cos_r);
-            const left = rl.vec2(v.x + (-s * 0.6) * cos_r - (s * 0.5) * sin_r, v.y + (-s * 0.6) * sin_r + (s * 0.5) * cos_r);
-            const right = rl.vec2(v.x + (s * 0.6) * cos_r - (s * 0.5) * sin_r, v.y + (s * 0.6) * sin_r + (s * 0.5) * cos_r);
+            // Rotation: x' = lx*cos - ly*sin, y' = lx*sin + ly*cos
+            const tip = rl.vec2(
+                v.x - tip_y * sin_r,
+                v.y + tip_y * cos_r,
+            );
+            const left = rl.vec2(
+                v.x + -hw * cos_r - tail_y * sin_r,
+                v.y + -hw * sin_r + tail_y * cos_r,
+            );
+            const right = rl.vec2(
+                v.x + hw * cos_r - tail_y * sin_r,
+                v.y + hw * sin_r + tail_y * cos_r,
+            );
 
             rl.drawTriangle(tip, left, right, col);
         }
@@ -218,6 +237,7 @@ pub const AisOverlay = struct {
         var best_dist: f32 = max_dist_sq;
         var best_idx: ?u16 = null;
         for (self.vessels[0..self.count], 0..) |v, i| {
+            if (!self.visible[i]) continue; // only hit-test drawn vessels
             const dx = world_pos.x - v.x;
             const dy = world_pos.y - v.y;
             const d2 = dx * dx + dy * dy;
