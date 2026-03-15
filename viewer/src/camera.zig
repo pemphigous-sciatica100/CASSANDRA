@@ -58,6 +58,7 @@ pub const CameraState = struct {
     // Smooth scroll zoom
     scroll_target_zoom: f32 = 0,
     scroll_anchor: rl.Vector2 = .{ .x = 0, .y = 0 }, // world-space point under cursor
+    scroll_screen_anchor: rl.Vector2 = .{ .x = 0, .y = 0 }, // screen-space point locked at scroll start
 
     pub fn init(b: Bounds, sw: c_int, sh: c_int) CameraState {
         var self = CameraState{
@@ -124,7 +125,12 @@ pub const CameraState = struct {
         if (wheel != 0) {
             self.anim_active = false; // cancel double-click animation on manual zoom
             const mouse_pos = rl.getMousePosition();
-            self.scroll_anchor = rl.getScreenToWorld2D(mouse_pos, self.cam);
+
+            // Lock screen anchor on first scroll; update world anchor from current zoom
+            if (self.scroll_target_zoom == 0) {
+                self.scroll_screen_anchor = mouse_pos;
+            }
+            self.scroll_anchor = rl.getScreenToWorld2D(self.scroll_screen_anchor, self.cam);
 
             // Accumulate into target zoom (allows rapid scroll stacking)
             if (self.scroll_target_zoom == 0) self.scroll_target_zoom = self.cam.zoom;
@@ -148,9 +154,8 @@ pub const CameraState = struct {
                 self.cam.zoom = @exp(log_cur + diff * @min(dt * SCROLL_SMOOTH, 1.0));
             }
 
-            // Re-anchor: keep the world point under cursor stationary
-            const mouse_pos = rl.getMousePosition();
-            const world_after = rl.getScreenToWorld2D(mouse_pos, self.cam);
+            // Re-anchor: keep the original screen point over the same world point
+            const world_after = rl.getScreenToWorld2D(self.scroll_screen_anchor, self.cam);
             self.cam.target.x += self.scroll_anchor.x - world_after.x;
             self.cam.target.y += self.scroll_anchor.y - world_after.y;
         }
