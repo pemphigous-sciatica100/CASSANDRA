@@ -208,6 +208,12 @@ python make_movie.py      # stitches into concept_timelapse.mp4
 |-----|--------|
 | `T` | Toggle motion trails |
 | `B` | Toggle bloom |
+| `C` | Toggle chromatic aberration |
+| `V` | Toggle scanlines |
+| `X` | Toggle night vision |
+| `K` | Toggle CRT (barrel distortion, phosphors, flicker) |
+| `H` | Toggle hologram/scanner |
+| `J` | Toggle VHS glitch |
 
 ### Overlays
 

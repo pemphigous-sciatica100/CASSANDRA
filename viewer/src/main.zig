@@ -633,9 +633,9 @@ pub fn main() !void {
 
         // Effects status indicator
         {
-            var fx_buf: [128]u8 = undefined;
+            var fx_buf: [256]u8 = undefined;
             var fx_len: usize = 0;
-            if (fx.trails_on or fx.bloom_on or navmesh_on or !edges_on or phys.geo_active or
+            if (fx.anyActive() or navmesh_on or !edges_on or phys.geo_active or
                 overlays.overlays.adsb.active or overlays.overlays.ais.active)
             {
                 @memcpy(fx_buf[0..4], "FX: ");
@@ -651,6 +651,54 @@ pub fn main() !void {
                     }
                     @memcpy(fx_buf[fx_len..][0..5], "BLOOM");
                     fx_len += 5;
+                }
+                if (fx.chromab_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..9], "CHROMATIC");
+                    fx_len += 9;
+                }
+                if (fx.scanlines_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..9], "SCANLINES");
+                    fx_len += 9;
+                }
+                if (fx.nightvis_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..8], "NIGHTVIS");
+                    fx_len += 8;
+                }
+                if (fx.crt_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..3], "CRT");
+                    fx_len += 3;
+                }
+                if (fx.hologram_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..8], "HOLOGRAM");
+                    fx_len += 8;
+                }
+                if (fx.vhs_on) {
+                    if (fx_len > 4) {
+                        @memcpy(fx_buf[fx_len..][0..3], " + ");
+                        fx_len += 3;
+                    }
+                    @memcpy(fx_buf[fx_len..][0..3], "VHS");
+                    fx_len += 3;
                 }
                 if (navmesh_on) {
                     if (fx_len > 4) {
