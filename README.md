@@ -143,6 +143,10 @@ python make_movie.py      # stitches into concept_timelapse.mp4
 | `S` | Toggle ships (AIS) |
 | `A` | Toggle aircraft (ADS-B) |
 
+## Like what you see?
+
+If you find CASSANDRA interesting, please give it a star and share it with others — it really helps the project grow.
+
 ## License
 
 See [LICENSE](LICENSE).
