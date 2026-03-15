@@ -27,9 +27,43 @@ RSS feeds ──► hourly.py (ingest) ──► nucleus.db (SQLite)
 ## Prerequisites
 
 - Python 3.11+
-- [Zig](https://ziglang.org/download/) (0.13+)
+- [Zig](https://ziglang.org/download/) (0.14+)
 - [Raylib](https://www.raylib.com/) (system library)
 - GloVe embeddings (see below)
+
+### Zig
+
+Download a prebuilt binary from [ziglang.org/download](https://ziglang.org/download/) and add it to your `PATH`, or use your package manager:
+
+```bash
+# Arch
+sudo pacman -S zig
+
+# macOS
+brew install zig
+
+# Ubuntu/Debian (via snap)
+sudo snap install zig --classic --beta
+```
+
+### Raylib
+
+Raylib needs to be installed as a system library so the Zig build can link against it:
+
+```bash
+# Arch
+sudo pacman -S raylib
+
+# macOS
+brew install raylib
+
+# Ubuntu/Debian
+sudo apt install libraylib-dev
+
+# From source (any platform)
+git clone https://github.com/raysan5/raylib.git
+cd raylib/src && make PLATFORM=PLATFORM_DESKTOP && sudo make install
+```
 
 ### GloVe embeddings
 
@@ -50,16 +84,23 @@ pip install numpy scipy scikit-learn feedparser nltk matplotlib pillow
 
 ## Running
 
-### 1. Ingest (hourly)
+### 1. Ingest
 
 ```bash
-python hourly.py
+python ingest_live.py
 ```
 
-This fetches current headlines, updates the model, and writes to `nucleus.db`. Set up a cron job or systemd timer to run it every hour:
+This runs continuously, round-robining through RSS feeds and drip-feeding headlines in small batches (default: 10 headlines every 6 seconds). A full cycle through all feeds takes about 6 minutes.
 
+```bash
+python ingest_live.py --interval 3 --batch 5   # faster, for testing
 ```
-0 * * * * cd /path/to/wordnets && .venv/bin/python hourly.py >> hourly.log 2>&1
+
+To run it as a background service with systemd (user):
+
+```bash
+cp wordnet-live.service ~/.config/systemd/user/
+systemctl --user enable --now wordnet-live.service
 ```
 
 ### 2. Viewer
