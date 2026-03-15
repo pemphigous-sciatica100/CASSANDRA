@@ -2,6 +2,8 @@
 
 A live map of what the internet is talking about.
 
+![CASSANDRA viewer in geographic mode](screenshot.png)
+
 The system continuously reads news feeds, groups the words it finds into clusters of related concepts, and plots them on an interactive 2D map. Topics that are trending glow brighter; topics the internet has moved on from fade out. Related concepts drift closer together, giving you a weather-radar view of the news cycle at a glance.
 
 ## Architecture
