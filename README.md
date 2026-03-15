@@ -6,6 +6,8 @@ A live map of what the internet is talking about.
 
 The system continuously reads news feeds, groups the words it finds into clusters of related concepts, and plots them on an interactive 2D map. Topics that are trending glow brighter; topics the internet has moved on from fade out. Related concepts drift closer together, giving you a weather-radar view of the news cycle at a glance.
 
+Live overlays track real-world movement on the same map — ships via AIS and aircraft via ADS-B, with a plugin system for adding more data sources. More overlays are on the way.
+
 ## Architecture
 
 ```
