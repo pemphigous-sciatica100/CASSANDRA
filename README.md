@@ -11,13 +11,15 @@ Live overlays track real-world movement on the same map — ships via AIS and ai
 ## Architecture
 
 ```
-RSS feeds ──► hourly.py (ingest) ──► nucleus.db (SQLite)
-                                         │
-                                         ▼
-                                   viewer (Zig + Raylib)
+feeds.json ──► ingest_live.py ──► nucleus.db (SQLite)
+                                       │
+                                       ▼
+                                 viewer (Zig + Raylib)
 ```
 
-- **`hourly.py`** — Fetches RSS headlines, tokenizes them, updates the nucleus model, writes snapshots and positions to SQLite.
+- **`ingest_live.py`** — Continuous ingester: round-robins through RSS feeds, drip-feeding headlines in small batches.
+- **`hourly.py`** — Core ingest logic and model helpers (used by `ingest_live.py`).
+- **`feeds.json`** — Configurable list of RSS/Atom feed sources.
 - **`prototype.py`** — Core model: `ConceptNucleus`, `WordNetNucleusModel`, GloVe embedding loader.
 - **`db.py`** — SQLite helpers (schema, snapshot storage, position I/O).
 - **`viewer/`** — Real-time interactive viewer built with Zig and Raylib.
