@@ -11,6 +11,7 @@ Each run:
 Run via systemd timer or cron.
 """
 
+import json
 import os
 import re
 import numpy as np
@@ -43,16 +44,16 @@ STOPWORDS = {
     'com', 'www', 'http', 'https', 'said', 'says', 'year', 'new',
 }
 
-FEEDS = [
-    ("Layoffs (US)", "https://news.google.com/rss/search?q=layoffs+OR+%22job+cuts%22+OR+%22workforce+reduction%22&hl=en-US&gl=US&ceid=US:en"),
-    ("Economy (US)", "https://news.google.com/rss/search?q=recession+OR+%22economic+slowdown%22+OR+%22consumer+spending%22&hl=en-US&gl=US&ceid=US:en"),
-    ("Middle East", "https://news.google.com/rss/search?q=Iran+Israel+war+OR+%22Middle+East+conflict%22+OR+%22Strait+of+Hormuz%22&hl=en-US&gl=US&ceid=US:en"),
-    ("Iran Sanctions", "https://news.google.com/rss/search?q=Iran+sanctions+OR+%22Iran+oil%22+OR+%22Iran+trade%22&hl=en-US&gl=US&ceid=US:en"),
-    ("Oil & Energy", "https://news.google.com/rss/search?q=oil+price+OR+%22crude+oil%22+OR+OPEC+OR+%22energy+crisis%22&hl=en-US&gl=US&ceid=US:en"),
-    ("China Economy", "https://news.google.com/rss/search?q=China+economy+OR+%22Chinese+manufacturing%22+OR+%22China+exports%22&hl=en&gl=SG&ceid=SG:en"),
-    ("Geopolitical", "https://news.google.com/rss/search?q=%22geopolitical+risk%22+OR+%22trade+war%22+OR+%22military+escalation%22+OR+%22defense+spending%22&hl=en-US&gl=US&ceid=US:en"),
-    ("TechCrunch", "https://techcrunch.com/feed/"),
-]
+FEEDS_PATH = BASE_DIR / 'feeds.json'
+
+
+def load_feeds():
+    """Load feeds from feeds.json, returning list of (name, url) tuples."""
+    with open(FEEDS_PATH) as f:
+        return [(entry['name'], entry['url']) for entry in json.load(f)]
+
+
+FEEDS = load_feeds()
 
 
 def tokenize(text):

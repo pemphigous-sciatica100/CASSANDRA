@@ -84,6 +84,32 @@ pip install numpy scipy scikit-learn feedparser nltk matplotlib pillow
 
 ## Running
 
+### Configuring feeds
+
+Feeds are defined in `feeds.json`. Each entry has a `name` and an RSS `url`:
+
+```json
+[
+  {"name": "Economy (US)", "url": "https://news.google.com/rss/search?q=recession+OR+%22economic+slowdown%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "TechCrunch",  "url": "https://techcrunch.com/feed/"}
+]
+```
+
+Any valid RSS or Atom feed URL will work. You can build custom Google News feeds by changing the search query:
+
+```
+https://news.google.com/rss/search?q=Taylor+Swift+OR+Beyonce&hl=en-US&gl=US&ceid=US:en
+```
+
+Some ideas:
+- **Local news** — search for your city or region (`q=Portland+Oregon`)
+- **Celebrities** — track names or entertainment topics
+- **Industry-specific** — `q=biotech+OR+%22clinical+trials%22` for pharma, etc.
+- **Non-English** — change `hl=` and `gl=` params (e.g. `hl=de&gl=DE&ceid=DE:de` for German news)
+- **Any RSS feed** — blogs, subreddits (`https://www.reddit.com/r/worldnews/.rss`), government feeds, etc.
+
+Changes take effect on the next ingest restart.
+
 ### 1. Ingest
 
 ```bash

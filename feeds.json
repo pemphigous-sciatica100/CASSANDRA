@@ -1,0 +1,10 @@
+[
+  {"name": "Layoffs (US)",    "url": "https://news.google.com/rss/search?q=layoffs+OR+%22job+cuts%22+OR+%22workforce+reduction%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "Economy (US)",    "url": "https://news.google.com/rss/search?q=recession+OR+%22economic+slowdown%22+OR+%22consumer+spending%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "Middle East",     "url": "https://news.google.com/rss/search?q=Iran+Israel+war+OR+%22Middle+East+conflict%22+OR+%22Strait+of+Hormuz%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "Iran Sanctions",  "url": "https://news.google.com/rss/search?q=Iran+sanctions+OR+%22Iran+oil%22+OR+%22Iran+trade%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "Oil & Energy",    "url": "https://news.google.com/rss/search?q=oil+price+OR+%22crude+oil%22+OR+OPEC+OR+%22energy+crisis%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "China Economy",   "url": "https://news.google.com/rss/search?q=China+economy+OR+%22Chinese+manufacturing%22+OR+%22China+exports%22&hl=en&gl=SG&ceid=SG:en"},
+  {"name": "Geopolitical",    "url": "https://news.google.com/rss/search?q=%22geopolitical+risk%22+OR+%22trade+war%22+OR+%22military+escalation%22+OR+%22defense+spending%22&hl=en-US&gl=US&ceid=US:en"},
+  {"name": "TechCrunch",      "url": "https://techcrunch.com/feed/"}
+]
