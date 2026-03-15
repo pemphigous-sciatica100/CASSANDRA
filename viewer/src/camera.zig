@@ -47,13 +47,17 @@ pub const CameraState = struct {
     double_clicked: bool = false, // true for one frame on double-click
     last_click_time: f64 = 0,
 
-    // Animated zoom transition
+    // Animated zoom transition (double-click)
     anim_active: bool = false,
     anim_progress: f32 = 0, // 0..1
     anim_from_zoom: f32 = 0,
     anim_to_zoom: f32 = 0,
     anim_from_target: rl.Vector2 = .{ .x = 0, .y = 0 },
     anim_to_target: rl.Vector2 = .{ .x = 0, .y = 0 },
+
+    // Smooth scroll zoom
+    scroll_target_zoom: f32 = 0,
+    scroll_anchor: rl.Vector2 = .{ .x = 0, .y = 0 }, // world-space point under cursor
 
     pub fn init(b: Bounds, sw: c_int, sh: c_int) CameraState {
         var self = CameraState{
@@ -81,6 +85,7 @@ pub const CameraState = struct {
     const MAX_ZOOM: f32 = 2000.0;
     const MIN_ZOOM: f32 = 2.0;
     const ANIM_DURATION: f32 = 1.0; // seconds
+    const SCROLL_SMOOTH: f32 = 12.0; // higher = snappier
 
     pub fn startAnim(self: *CameraState, to_zoom: f32, to_target: rl.Vector2) void {
         self.anim_from_zoom = self.cam.zoom;
@@ -117,16 +122,37 @@ pub const CameraState = struct {
 
         const wheel = rl.getMouseWheelMove();
         if (wheel != 0) {
-            self.anim_active = false; // cancel animation on manual zoom
+            self.anim_active = false; // cancel double-click animation on manual zoom
             const mouse_pos = rl.getMousePosition();
-            const world_before = rl.getScreenToWorld2D(mouse_pos, self.cam);
+            self.scroll_anchor = rl.getScreenToWorld2D(mouse_pos, self.cam);
 
-            self.cam.zoom *= if (wheel > 0) 1.1 else 1.0 / 1.1;
-            self.cam.zoom = std.math.clamp(self.cam.zoom, MIN_ZOOM, MAX_ZOOM);
+            // Accumulate into target zoom (allows rapid scroll stacking)
+            if (self.scroll_target_zoom == 0) self.scroll_target_zoom = self.cam.zoom;
+            self.scroll_target_zoom *= if (wheel > 0) 1.25 else 1.0 / 1.25;
+            self.scroll_target_zoom = std.math.clamp(self.scroll_target_zoom, MIN_ZOOM, MAX_ZOOM);
+        }
 
+        // Smooth scroll zoom interpolation
+        if (self.scroll_target_zoom != 0) {
+            const dt = rl.getFrameTime();
+            const log_cur = @log(self.cam.zoom);
+            const log_tgt = @log(self.scroll_target_zoom);
+            const diff = log_tgt - log_cur;
+
+            if (@abs(diff) < 0.001) {
+                // Close enough — snap and stop
+                self.cam.zoom = self.scroll_target_zoom;
+                self.scroll_target_zoom = 0;
+            } else {
+                // Exponential ease-out in log space
+                self.cam.zoom = @exp(log_cur + diff * @min(dt * SCROLL_SMOOTH, 1.0));
+            }
+
+            // Re-anchor: keep the world point under cursor stationary
+            const mouse_pos = rl.getMousePosition();
             const world_after = rl.getScreenToWorld2D(mouse_pos, self.cam);
-            self.cam.target.x += world_before.x - world_after.x;
-            self.cam.target.y += world_before.y - world_after.y;
+            self.cam.target.x += self.scroll_anchor.x - world_after.x;
+            self.cam.target.y += self.scroll_anchor.y - world_after.y;
         }
 
         if (rl.isMouseButtonPressed(rl.MOUSE_BUTTON_RIGHT)) {
