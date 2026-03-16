@@ -18,6 +18,18 @@ pub fn build(b: *std.Build) void {
     });
     exe.addIncludePath(b.path("vendor/sqlite3"));
 
+    // QuickJS — compiled as C source
+    const qjs_flags = &.{
+        "-DCONFIG_VERSION=\"2025-09-13\"",
+        "-D_GNU_SOURCE",
+    };
+    exe.addCSourceFile(.{ .file = b.path("vendor/quickjs/quickjs.c"), .flags = qjs_flags });
+    exe.addCSourceFile(.{ .file = b.path("vendor/quickjs/cutils.c"), .flags = qjs_flags });
+    exe.addCSourceFile(.{ .file = b.path("vendor/quickjs/dtoa.c"), .flags = qjs_flags });
+    exe.addCSourceFile(.{ .file = b.path("vendor/quickjs/libregexp.c"), .flags = qjs_flags });
+    exe.addCSourceFile(.{ .file = b.path("vendor/quickjs/libunicode.c"), .flags = qjs_flags });
+    exe.addIncludePath(b.path("vendor/quickjs"));
+
     exe.linkSystemLibrary("raylib");
     exe.linkSystemLibrary("libavformat");
     exe.linkSystemLibrary("libavcodec");

@@ -11,6 +11,7 @@ const live = @import("live.zig");
 const bvh = @import("bvh.zig");
 const effects = @import("effects.zig");
 const terminal_mod = @import("terminal.zig");
+const js_mod = @import("js.zig");
 const navmesh = @import("navmesh.zig");
 const worldmap_mod = @import("worldmap.zig");
 const overlay_mod = @import("overlay.zig");
@@ -112,10 +113,17 @@ pub fn main() !void {
     term.init(100, 30, 14.0);
     defer term.deinit();
 
+    // JavaScript runtime
+    var js = js_mod.JsRuntime.init(&term) orelse {
+        std.debug.print("Failed to init QuickJS runtime\n", .{});
+        return;
+    };
+    defer js.deinit();
+
     // Welcome message
     term.write("\x1b[1;32mCASSANDRA Terminal\x1b[0m v1.0\r\n");
     term.write("\x1b[36m-----------------------------\x1b[0m\r\n");
-    term.write("Type \x1b[1;33mhelp\x1b[0m for commands\r\n\r\n");
+    term.write("Type \x1b[1;33mhelp\x1b[0m for commands, \x1b[1;33mjs <code>\x1b[0m to eval JavaScript\r\n\r\n");
     term.showPrompt();
     defer fx.deinit();
 
@@ -274,12 +282,20 @@ pub fn main() !void {
             if (term.getCommand()) |cmd| {
                 if (std.mem.eql(u8, cmd, "help")) {
                     term.write("\x1b[1;36mAvailable commands:\x1b[0m\r\n");
-                    term.write("  \x1b[1;33mhelp\x1b[0m      - Show this help\r\n");
-                    term.write("  \x1b[1;33mclear\x1b[0m     - Clear terminal\r\n");
-                    term.write("  \x1b[1;33mstatus\x1b[0m    - Show system status\r\n");
-                    term.write("  \x1b[1;33mfeeds\x1b[0m     - List active feeds\r\n");
-                    term.write("  \x1b[1;33mcams\x1b[0m      - List cameras\r\n");
-                    term.write("  \x1b[1;33mquit\x1b[0m      - Close terminal\r\n");
+                    term.write("  \x1b[1;33mhelp\x1b[0m          - Show this help\r\n");
+                    term.write("  \x1b[1;33mclear\x1b[0m         - Clear terminal\r\n");
+                    term.write("  \x1b[1;33mstatus\x1b[0m        - Show system status\r\n");
+                    term.write("  \x1b[1;33mjs <code>\x1b[0m     - Evaluate JavaScript\r\n");
+                    term.write("  \x1b[1;33mrun <file.js>\x1b[0m - Run a JavaScript file\r\n");
+                    term.write("  \x1b[1;33mquit\x1b[0m          - Close terminal\r\n");
+                    term.write("\r\n\x1b[1;36mJavaScript API:\x1b[0m\r\n");
+                    term.write("  \x1b[33mprint(...)\x1b[0m       - Print to terminal\r\n");
+                    term.write("  \x1b[33mclear()\x1b[0m          - Clear screen\r\n");
+                    term.write("  \x1b[33mterm.write(s)\x1b[0m    - Raw write (ANSI supported)\r\n");
+                    term.write("  \x1b[33mterm.cursor(r,c)\x1b[0m - Move cursor\r\n");
+                    term.write("  \x1b[33mterm.color(name)\x1b[0m - Set color (red/green/cyan/...)\r\n");
+                    term.write("  \x1b[33mterm.reset()\x1b[0m     - Reset colors\r\n");
+                    term.write("  \x1b[33mterm.cols/rows\x1b[0m   - Terminal dimensions\r\n");
                 } else if (std.mem.eql(u8, cmd, "clear")) {
                     term.write("\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, cmd, "quit") or std.mem.eql(u8, cmd, "exit")) {
@@ -288,6 +304,14 @@ pub fn main() !void {
                 } else if (std.mem.eql(u8, cmd, "status")) {
                     term.print("\x1b[1;36mNuclei:\x1b[0m {d}\r\n", .{nd.synset_names.items.len});
                     term.print("\x1b[1;36mKeyframes:\x1b[0m {d}\r\n", .{nd.keyframes.items.len});
+                } else if (cmd.len > 3 and std.mem.eql(u8, cmd[0..3], "js ")) {
+                    // Inline JavaScript evaluation
+                    js.eval(cmd[3..], "<terminal>");
+                } else if (cmd.len > 4 and std.mem.eql(u8, cmd[0..4], "run ")) {
+                    // Run a JavaScript file
+                    const path = cmd[4..];
+                    term.print("\x1b[0;36mRunning {s}...\x1b[0m\r\n", .{path});
+                    js.evalFile(path);
                 } else if (cmd.len > 0) {
                     term.print("\x1b[1;31mUnknown command:\x1b[0m {s}\r\n", .{cmd});
                 }
