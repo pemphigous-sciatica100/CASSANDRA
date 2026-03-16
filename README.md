@@ -249,6 +249,12 @@ python make_movie.py      # stitches into concept_timelapse.mp4
 | `A` | Toggle aircraft (ADS-B) |
 | `W` | Toggle cameras |
 
+## Terminal
+
+CASSANDRA includes a built-in JavaScript-powered terminal. Press **backtick** to open it. Run commands, write scripts, pipe data between programs, or launch host binaries like `htop`, `vi`, and `ssh` — all inside the viewer.
+
+See [TERMINAL.md](TERMINAL.md) for the full documentation.
+
 ## Like what you see?
 
 If you find CASSANDRA interesting, please give it a star and share it with others — it really helps the project grow.
