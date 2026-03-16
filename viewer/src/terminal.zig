@@ -33,9 +33,9 @@ pub const Terminal = struct {
     pub const DEFAULT_FG = rl.Color{ .r = 200, .g = 200, .b = 200, .a = 255 };
     pub const DEFAULT_BG = rl.Color{ .r = 8, .g = 10, .b = 16, .a = 240 };
     pub const CURSOR_COLOR = rl.Color{ .r = 0, .g = 255, .b = 100, .a = 200 };
-    const MAX_COLS: u16 = 320;
-    const MAX_ROWS: u16 = 200;
-    const SCROLLBACK_LINES: u32 = 5000;
+    const MAX_COLS: u16 = 200;
+    const MAX_ROWS: u16 = 80;
+    const SCROLLBACK_LINES: u32 = 1000;
 
     cols: u16 = 80,
     rows: u16 = 24,

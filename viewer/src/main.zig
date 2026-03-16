@@ -844,6 +844,10 @@ pub fn main() !void {
         }
 
         perf.endFrame();
+        // Graphics displays (JS gfx API — process command ring)
+        js.display_mgr.processAndRender();
+        js.display_mgr.drawAll();
+
         // Terminal overlay
         if (term.visible) {
             term.render();

@@ -1,5 +1,6 @@
 const std = @import("std");
 const terminal_mod = @import("terminal.zig");
+const display_mod = @import("display.zig");
 
 pub const c = @cImport({
     @cInclude("quickjs.h");
@@ -61,8 +62,14 @@ pub const JsRuntime = struct {
     // Terminal ref (for reading dimensions — main thread only for actual writes)
     term: *terminal_mod.Terminal = undefined,
 
+    // Display manager for graphics API (heap-allocated ring buffer)
+    display_mgr: display_mod.DisplayManager = undefined,
+    display_mgr_init: bool = false,
+
     pub fn init(self: *JsRuntime, term: *terminal_mod.Terminal) void {
         self.term = term;
+        self.display_mgr = display_mod.DisplayManager.init(std.heap.page_allocator);
+        self.display_mgr_init = true;
         self.shutdown.store(false, .release);
         self.worker = std.Thread.spawn(.{}, workerLoop, .{self}) catch null;
     }
@@ -78,6 +85,10 @@ pub const JsRuntime = struct {
         if (self.worker) |w| {
             w.join();
             self.worker = null;
+        }
+        if (self.display_mgr_init) {
+            self.display_mgr.deinit();
+            self.display_mgr_init = false;
         }
     }
 
@@ -400,6 +411,27 @@ pub const JsRuntime = struct {
         _ = c.JS_SetPropertyStr(ctx, fs_obj, "listDir", c.JS_NewCFunction(ctx, jsFsListDir, "listDir", 1));
         _ = c.JS_SetPropertyStr(ctx, fs_obj, "exists", c.JS_NewCFunction(ctx, jsFsExists, "exists", 1));
         _ = c.JS_SetPropertyStr(ctx, global, "fs", fs_obj);
+
+        // gfx object — graphics display API
+        const gfx_obj = c.JS_NewObject(ctx);
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "create", c.JS_NewCFunction(ctx, jsGfxCreate, "create", 3));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "destroy", c.JS_NewCFunction(ctx, jsGfxDestroy, "destroy", 1));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "move", c.JS_NewCFunction(ctx, jsGfxMove, "move", 3));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "begin", c.JS_NewCFunction(ctx, jsGfxBegin, "begin", 1));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "end", c.JS_NewCFunction(ctx, jsGfxEnd, "end", 1));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "clear", c.JS_NewCFunction(ctx, jsGfxClear, "clear", 3));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "line", c.JS_NewCFunction(ctx, jsGfxLine, "line", 6));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rect", c.JS_NewCFunction(ctx, jsGfxRect, "rect", 5));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rectLines", c.JS_NewCFunction(ctx, jsGfxRectLines, "rectLines", 5));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "circle", c.JS_NewCFunction(ctx, jsGfxCircle, "circle", 4));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "triangle", c.JS_NewCFunction(ctx, jsGfxTriangle, "triangle", 7));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "text", c.JS_NewCFunction(ctx, jsGfxText, "text", 5));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "cube", c.JS_NewCFunction(ctx, jsGfxCube, "cube", 7));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "line3d", c.JS_NewCFunction(ctx, jsGfxLine3d, "line3d", 7));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "camera", c.JS_NewCFunction(ctx, jsGfxCamera, "camera", 4));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rgb", c.JS_NewCFunction(ctx, jsGfxRgb, "rgb", 3));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rgba", c.JS_NewCFunction(ctx, jsGfxRgba, "rgba", 4));
+        _ = c.JS_SetPropertyStr(ctx, global, "gfx", gfx_obj);
     }
 
     fn getSelf(ctx: ?*c.JSContext) *JsRuntime {
@@ -958,6 +990,240 @@ pub const JsRuntime = struct {
         c.pty_close(master_fd, child_pid);
         trm.raw_mode = was_raw;
         return c.qjs_true();
+    }
+
+    // ---------------------------------------------------------------
+    // Graphics display functions
+    // ---------------------------------------------------------------
+
+    fn getF(ctx: ?*c.JSContext, argv: [*c]c.JSValue, idx: usize) f32 {
+        var v: f64 = 0;
+        _ = c.JS_ToFloat64(ctx, &v, argv[idx]);
+        return @floatCast(v);
+    }
+
+    fn getI(ctx: ?*c.JSContext, argv: [*c]c.JSValue, idx: usize) i32 {
+        var v: i32 = 0;
+        _ = c.JS_ToInt32(ctx, &v, argv[idx]);
+        return v;
+    }
+
+    fn getU(ctx: ?*c.JSContext, argv: [*c]c.JSValue, idx: usize) u32 {
+        var v: i64 = 0;
+        _ = c.JS_ToInt64(ctx, &v, argv[idx]);
+        return @intCast(@as(u64, @bitCast(v)) & 0xFFFFFFFF);
+    }
+
+    fn colorFromArgs(ctx: ?*c.JSContext, argv: [*c]c.JSValue, idx: usize) display_mod.Color4 {
+        return display_mod.fromU32(getU(ctx, argv, idx));
+    }
+
+    fn pushGfx(self: *JsRuntime, cmd: display_mod.DrawCmd) void {
+        self.display_mgr.ring.push(cmd);
+    }
+
+    fn jsGfxCreate(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .create };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        cmd.f[0] = if (argc >= 2) getF(ctx, argv, 1) else 320;
+        cmd.f[1] = if (argc >= 3) getF(ctx, argv, 2) else 240;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxDestroy(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .destroy };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxMove(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .move_display };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        cmd.f[0] = if (argc >= 2) getF(ctx, argv, 1) else 10;
+        cmd.f[1] = if (argc >= 3) getF(ctx, argv, 2) else 10;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxBegin(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .begin_frame };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxEnd(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .end_frame };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxClear(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        const r: u8 = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 0xFF) else 0;
+        const g: u8 = if (argc >= 2) @intCast(@as(u32, @bitCast(getI(ctx, argv, 1))) & 0xFF) else 0;
+        const b: u8 = if (argc >= 3) @intCast(@as(u32, @bitCast(getI(ctx, argv, 2))) & 0xFF) else 0;
+        self.pushGfx(.{ .tag = .clear, .color = .{ .r = r, .g = g, .b = b, .a = 255 } });
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxLine(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 5) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .line, .color = colorFromArgs(ctx, argv, 4) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        cmd.f[4] = if (argc >= 6) getF(ctx, argv, 5) else 1.0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxRect(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 5) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .rect, .color = colorFromArgs(ctx, argv, 4) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxRectLines(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 5) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .rect_lines, .color = colorFromArgs(ctx, argv, 4) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        cmd.f[4] = if (argc >= 6) getF(ctx, argv, 5) else 1.0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxCircle(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 4) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .circle, .color = colorFromArgs(ctx, argv, 3) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxTriangle(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 7) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .triangle, .color = colorFromArgs(ctx, argv, 6) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        cmd.f[4] = getF(ctx, argv, 4);
+        cmd.f[5] = getF(ctx, argv, 5);
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxText(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 3) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .text };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        const str = c.JS_ToCString(ctx, argv[2]);
+        if (str != null) {
+            const slice = cStrToSlice(str);
+            const n = @min(slice.len, 64);
+            @memcpy(cmd.text_buf[0..n], slice[0..n]);
+            cmd.text_len = @intCast(n);
+            c.JS_FreeCString(ctx, str);
+        }
+        cmd.f[2] = if (argc >= 4) getF(ctx, argv, 3) else 10;
+        cmd.color = if (argc >= 5) colorFromArgs(ctx, argv, 4) else .{ .r = 255, .g = 255, .b = 255, .a = 255 };
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxCube(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 5) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .cube3d, .color = colorFromArgs(ctx, argv, 4) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        cmd.f[4] = if (argc >= 6) getF(ctx, argv, 5) else 0;
+        cmd.f[5] = if (argc >= 7) getF(ctx, argv, 6) else 0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxLine3d(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 7) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .line3d, .color = colorFromArgs(ctx, argv, 6) };
+        cmd.f[0] = getF(ctx, argv, 0);
+        cmd.f[1] = getF(ctx, argv, 1);
+        cmd.f[2] = getF(ctx, argv, 2);
+        cmd.f[3] = getF(ctx, argv, 3);
+        cmd.f[4] = getF(ctx, argv, 4);
+        cmd.f[5] = getF(ctx, argv, 5);
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxCamera(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .set_camera };
+        cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
+        cmd.f[0] = if (argc >= 2) getF(ctx, argv, 1) else 5.0;
+        cmd.f[1] = if (argc >= 3) getF(ctx, argv, 2) else 0.3;
+        cmd.f[2] = if (argc >= 4) getF(ctx, argv, 3) else 0.0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    fn jsGfxRgb(_: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        var r: i32 = 255;
+        var g: i32 = 255;
+        var b: i32 = 255;
+        if (argc >= 1) _ = c.JS_ToInt32(null, &r, argv[0]);
+        if (argc >= 2) _ = c.JS_ToInt32(null, &g, argv[1]);
+        if (argc >= 3) _ = c.JS_ToInt32(null, &b, argv[2]);
+        const rgba: u32 = (@as(u32, @intCast(r & 0xFF)) << 24) |
+            (@as(u32, @intCast(g & 0xFF)) << 16) |
+            (@as(u32, @intCast(b & 0xFF)) << 8) | 0xFF;
+        return c.JS_NewInt64(null, @intCast(rgba));
+    }
+
+    fn jsGfxRgba(_: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        var r: i32 = 255;
+        var g: i32 = 255;
+        var b: i32 = 255;
+        var a: i32 = 255;
+        if (argc >= 1) _ = c.JS_ToInt32(null, &r, argv[0]);
+        if (argc >= 2) _ = c.JS_ToInt32(null, &g, argv[1]);
+        if (argc >= 3) _ = c.JS_ToInt32(null, &b, argv[2]);
+        if (argc >= 4) _ = c.JS_ToInt32(null, &a, argv[3]);
+        const rgba: u32 = (@as(u32, @intCast(r & 0xFF)) << 24) |
+            (@as(u32, @intCast(g & 0xFF)) << 16) |
+            (@as(u32, @intCast(b & 0xFF)) << 8) |
+            @as(u32, @intCast(a & 0xFF));
+        return c.JS_NewInt64(null, @intCast(rgba));
     }
 
     // ---------------------------------------------------------------
