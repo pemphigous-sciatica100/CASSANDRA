@@ -137,11 +137,9 @@ pub fn main() !void {
     term.init(100, 30, 14.0);
     defer term.deinit();
 
-    // JavaScript runtime
-    var js = js_mod.JsRuntime.init(&term) orelse {
-        std.debug.print("Failed to init QuickJS runtime\n", .{});
-        return;
-    };
+    // JavaScript runtime (runs on worker thread)
+    var js: js_mod.JsRuntime = .{};
+    js.init(&term);
     defer js.deinit();
 
     // Welcome message
@@ -298,6 +296,9 @@ pub fn main() !void {
         }
 
         // Terminal input takes priority when focused
+        // Always drain JS output (even if terminal not focused, scripts may be running)
+        js.drainOutput();
+
         if (term.focused) {
             term.handleInput();
             term.update(rl.getFrameTime());
