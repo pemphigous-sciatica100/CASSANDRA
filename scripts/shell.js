@@ -87,19 +87,8 @@ while (true) {
         globalThis.__piped = piped;
 
         if (!isLast) {
-            // Capture output for pipe
-            const captured = [];
-            const origWrite = term.write.bind(term);
-            // Override print to capture
-            const origPrint = globalThis.print;
-            globalThis.print = function(...a) {
-                captured.push(a.join(" "));
-            };
-            // We can't easily override term.write from JS, so for piped non-last
-            // stages we'll just exec and let print() capture work
-            exec(scriptPath);
-            globalThis.print = origPrint;
-            stdin = captured.join("\n");
+            // Capture all output (print + term.write) at native level
+            stdin = exec(scriptPath, true) || "";
             piped = true;
         } else {
             // Last stage — output goes to terminal

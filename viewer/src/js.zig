@@ -368,8 +368,9 @@ pub const JsRuntime = struct {
         _ = c.JS_SetPropertyStr(ctx, term_obj, "readLine", c.JS_NewCFunction(ctx, jsTermReadLine, "readLine", 0));
         _ = c.JS_SetPropertyStr(ctx, global, "term", term_obj);
 
-        // exec(filename) — run a JS file in its own scope
-        _ = c.JS_SetPropertyStr(ctx, global, "exec", c.JS_NewCFunction(ctx, jsExec, "exec", 1));
+        // exec(filename, capture?) — run a JS file in its own scope
+        // If capture is true, returns captured output as string instead of sending to terminal
+        _ = c.JS_SetPropertyStr(ctx, global, "exec", c.JS_NewCFunction(ctx, jsExec, "exec", 2));
 
         // fs object
         const fs_obj = c.JS_NewObject(ctx);
@@ -599,7 +600,8 @@ pub const JsRuntime = struct {
         return c.JS_NewStringLen(ctx, &buf, len);
     }
 
-    /// exec(filename) — run a JS file in its own IIFE scope
+    /// exec(filename, capture?) — run a JS file in its own IIFE scope.
+    /// If capture is truthy, returns all output as a string instead of sending to terminal.
     fn jsExec(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
         if (argc < 1) return c.qjs_undefined();
         const real_ctx = ctx orelse return c.qjs_undefined();
@@ -610,8 +612,17 @@ pub const JsRuntime = struct {
 
         const self = getSelf(ctx);
 
+        // Check capture flag
+        var capture = false;
+        if (argc >= 2) {
+            var cap_val: c_int = 0;
+            _ = c.JS_ToInt32(real_ctx, &cap_val, argv[1]);
+            capture = cap_val != 0;
+        }
+
         const file = std.fs.cwd().openFile(path, .{}) catch {
             self.pushOutputFmt("\x1b[1;31mError:\x1b[0m could not open {s}\r\n", .{path});
+            if (capture) return c.qjs_null();
             return c.qjs_false();
         };
         defer file.close();
@@ -622,6 +633,7 @@ pub const JsRuntime = struct {
         @memcpy(code_buf[0..prefix.len], prefix);
         const n = file.readAll(code_buf[prefix.len .. code_buf.len - suffix.len]) catch {
             self.pushOutputFmt("\x1b[1;31mError:\x1b[0m could not read {s}\r\n", .{path});
+            if (capture) return c.qjs_null();
             return c.qjs_false();
         };
         @memcpy(code_buf[prefix.len + n ..][0..suffix.len], suffix);
@@ -633,12 +645,28 @@ pub const JsRuntime = struct {
         @memcpy(file_z[0..fl], path[0..fl]);
         file_z[fl] = 0;
 
+        // Enable capture mode
+        if (capture) {
+            self.capturing = true;
+            self.capture_len = 0;
+        }
+
         const val = c.JS_Eval(real_ctx, &code_buf, total, &file_z, c.JS_EVAL_TYPE_GLOBAL);
         defer c.JS_FreeValue(real_ctx, val);
 
         if (c.qjs_is_exception(val) != 0) {
+            if (capture) self.capturing = false;
             printException(real_ctx, self);
+            if (capture) return c.qjs_null();
             return c.qjs_false();
+        }
+
+        // Return captured output
+        if (capture) {
+            self.capturing = false;
+            const result = c.JS_NewStringLen(real_ctx, &self.capture_buf, self.capture_len);
+            self.capture_len = 0;
+            return result;
         }
 
         return c.qjs_true();
