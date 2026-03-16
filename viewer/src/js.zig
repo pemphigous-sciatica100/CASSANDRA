@@ -66,6 +66,10 @@ pub const JsRuntime = struct {
 
     pub fn deinit(self: *JsRuntime) void {
         self.shutdown.store(true, .release);
+        // Unblock readLine/getKey by pushing a dummy key
+        self.term.key_mutex.lock();
+        self.term.pushKey(0);
+        self.term.key_mutex.unlock();
         if (self.worker) |w| {
             w.join();
             self.worker = null;
@@ -576,145 +580,144 @@ pub const JsRuntime = struct {
         var saved_len: usize = 0;
 
         while (!self.shutdown.load(.acquire)) {
-            var key_buf: [8]u8 = undefined;
-            const key_len = trm.readKeySeq(&key_buf);
-            if (key_len == 0) {
+            const ch = trm.readKey();
+            if (ch == 0) {
                 std.time.sleep(10 * std.time.ns_per_ms);
                 continue;
             }
 
-            if (key_len == 1) {
-                switch (key_buf[0]) {
-                    13 => { // Enter
-                        // Move cursor to end before newline
-                        self.moveCursorRight(buf[0..len], pos, len - pos);
-                        self.pushOutput("\r\n");
-                        if (len > 0) self.addHistory(buf[0..len]);
-                        break;
-                    },
-                    8 => { // Backspace
-                        if (pos > 0) {
-                            // Shift chars left
-                            std.mem.copyForwards(u8, buf[pos - 1 .. len - 1], buf[pos..len]);
-                            pos -= 1;
-                            len -= 1;
-                            self.redrawFrom(buf[0..len], pos, len + 1);
+            switch (ch) {
+                13 => { // Enter
+                    self.moveCursorRight(buf[0..len], pos, len - pos);
+                    self.pushOutput("\r\n");
+                    if (len > 0) self.addHistory(buf[0..len]);
+                    break;
+                },
+                8 => { // Backspace
+                    if (pos > 0) {
+                        std.mem.copyForwards(u8, buf[pos - 1 .. len - 1], buf[pos..len]);
+                        pos -= 1;
+                        len -= 1;
+                        self.redrawFrom(buf[0..len], pos, len + 1);
+                    }
+                },
+                127 => { // Delete
+                    if (pos < len) {
+                        std.mem.copyForwards(u8, buf[pos .. len - 1], buf[pos + 1 .. len]);
+                        len -= 1;
+                        self.redrawFrom(buf[0..len], pos, len + 1);
+                    }
+                },
+                1 => { // Ctrl-A — home
+                    self.moveCursorLeft(pos);
+                    pos = 0;
+                },
+                5 => { // Ctrl-E — end
+                    self.moveCursorRight(buf[0..len], pos, len - pos);
+                    pos = len;
+                },
+                27 => { // ESC — start of escape sequence
+                    // Read CSI sequence without sleeping (check queue immediately)
+                    const b2 = trm.readKey();
+                    if (b2 == '[') {
+                        const b3 = trm.readKey();
+                        if (b3 == '1') {
+                            // Modifier sequence: CSI 1;5 C/D
+                            const b4 = trm.readKey();
+                            if (b4 == ';') {
+                                const b5 = trm.readKey();
+                                if (b5 == '5') {
+                                    const b6 = trm.readKey();
+                                    switch (b6) {
+                                        'D' => { // Ctrl+Left
+                                            if (pos > 0) {
+                                                var p = pos;
+                                                while (p > 0 and buf[p - 1] == ' ') p -= 1;
+                                                while (p > 0 and buf[p - 1] != ' ') p -= 1;
+                                                self.moveCursorLeft(pos - p);
+                                                pos = p;
+                                            }
+                                        },
+                                        'C' => { // Ctrl+Right
+                                            if (pos < len) {
+                                                var p = pos;
+                                                while (p < len and buf[p] != ' ') p += 1;
+                                                while (p < len and buf[p] == ' ') p += 1;
+                                                self.moveCursorRight(buf[0..len], pos, p - pos);
+                                                pos = p;
+                                            }
+                                        },
+                                        else => {},
+                                    }
+                                }
+                            }
+                        } else {
+                            switch (b3) {
+                                'A' => { // Up
+                                    const max_idx: isize = @intCast(self.history_count);
+                                    if (hist_idx + 1 < max_idx) {
+                                        if (hist_idx == -1) {
+                                            @memcpy(saved_buf[0..len], buf[0..len]);
+                                            saved_len = len;
+                                        }
+                                        hist_idx += 1;
+                                        self.loadHistoryRL(hist_idx, &buf, &len, &pos);
+                                    }
+                                },
+                                'B' => { // Down
+                                    if (hist_idx > 0) {
+                                        hist_idx -= 1;
+                                        self.loadHistoryRL(hist_idx, &buf, &len, &pos);
+                                    } else if (hist_idx == 0) {
+                                        hist_idx = -1;
+                                        self.eraseLineFrom(pos, len);
+                                        @memcpy(buf[0..saved_len], saved_buf[0..saved_len]);
+                                        len = saved_len;
+                                        pos = len;
+                                        self.pushOutput(buf[0..len]);
+                                    }
+                                },
+                                'C' => { // Right
+                                    if (pos < len) {
+                                        self.pushOutput(buf[pos .. pos + 1]);
+                                        pos += 1;
+                                    }
+                                },
+                                'D' => { // Left
+                                    if (pos > 0) {
+                                        self.pushOutput("\x08");
+                                        pos -= 1;
+                                    }
+                                },
+                                'H' => { // Home
+                                    self.moveCursorLeft(pos);
+                                    pos = 0;
+                                },
+                                'F' => { // End
+                                    self.moveCursorRight(buf[0..len], pos, len - pos);
+                                    pos = len;
+                                },
+                                else => {},
+                            }
                         }
-                    },
-                    127 => { // Delete
+                    }
+                    // else: bare ESC — ignore
+                },
+                else => {
+                    if (ch >= 32 and ch < 127 and len < buf.len) {
                         if (pos < len) {
-                            std.mem.copyForwards(u8, buf[pos .. len - 1], buf[pos + 1 .. len]);
-                            len -= 1;
-                            self.redrawFrom(buf[0..len], pos, len + 1);
+                            std.mem.copyBackwards(u8, buf[pos + 1 .. len + 1], buf[pos..len]);
                         }
-                    },
-                    1 => { // Ctrl-A — home
-                        self.moveCursorLeft(pos);
-                        pos = 0;
-                    },
-                    5 => { // Ctrl-E — end
-                        self.moveCursorRight(buf[0..len], pos, len - pos);
-                        pos = len;
-                    },
-                    27 => {}, // Escape alone — ignore
-                    else => {
-                        if (key_buf[0] >= 32 and key_buf[0] < 127 and len < buf.len) {
-                            // Insert at cursor position
-                            if (pos < len) {
-                                std.mem.copyBackwards(u8, buf[pos + 1 .. len + 1], buf[pos..len]);
-                            }
-                            buf[pos] = key_buf[0];
-                            len += 1;
-                            pos += 1;
-                            if (pos == len) {
-                                // Appending at end — just echo
-                                self.pushOutput(key_buf[0..1]);
-                            } else {
-                                // Inserted in middle — redraw rest of line
-                                self.redrawFrom(buf[0..len], pos - 1, len);
-                            }
-                        }
-                    },
-                }
-            } else if (key_len >= 3 and key_buf[0] == 27 and key_buf[1] == '[') {
-                // Check for modifier sequences like CSI 1;5 C/D (Ctrl+arrow)
-                if (key_len >= 5 and key_buf[2] == '1' and key_buf[3] == ';' and key_buf[4] == '5') {
-                    if (key_len >= 6) {
-                        switch (key_buf[5]) {
-                            'D' => { // Ctrl+Left — word jump left
-                                if (pos > 0) {
-                                    var p = pos;
-                                    // Skip spaces
-                                    while (p > 0 and buf[p - 1] == ' ') p -= 1;
-                                    // Skip word
-                                    while (p > 0 and buf[p - 1] != ' ') p -= 1;
-                                    self.moveCursorLeft(pos - p);
-                                    pos = p;
-                                }
-                            },
-                            'C' => { // Ctrl+Right — word jump right
-                                if (pos < len) {
-                                    var p = pos;
-                                    // Skip word
-                                    while (p < len and buf[p] != ' ') p += 1;
-                                    // Skip spaces
-                                    while (p < len and buf[p] == ' ') p += 1;
-                                    self.moveCursorRight(buf[0..len], pos, p - pos);
-                                    pos = p;
-                                }
-                            },
-                            else => {},
+                        buf[pos] = ch;
+                        len += 1;
+                        pos += 1;
+                        if (pos == len) {
+                            self.pushOutput(buf[pos - 1 .. pos]);
+                        } else {
+                            self.redrawFrom(buf[0..len], pos - 1, len);
                         }
                     }
-                } else {
-                    switch (key_buf[2]) {
-                        'A' => { // Up — previous history
-                            const max_idx: isize = @intCast(self.history_count);
-                            if (hist_idx + 1 < max_idx) {
-                                if (hist_idx == -1) {
-                                    @memcpy(saved_buf[0..len], buf[0..len]);
-                                    saved_len = len;
-                                }
-                                hist_idx += 1;
-                                self.loadHistoryRL(hist_idx, &buf, &len, &pos);
-                            }
-                        },
-                        'B' => { // Down — next history / back to current
-                            if (hist_idx > 0) {
-                                hist_idx -= 1;
-                                self.loadHistoryRL(hist_idx, &buf, &len, &pos);
-                            } else if (hist_idx == 0) {
-                                hist_idx = -1;
-                                self.eraseLineFrom(pos, len);
-                                @memcpy(buf[0..saved_len], saved_buf[0..saved_len]);
-                                len = saved_len;
-                                pos = len;
-                                self.pushOutput(buf[0..len]);
-                            }
-                        },
-                        'C' => { // Right
-                            if (pos < len) {
-                                self.pushOutput(buf[pos .. pos + 1]);
-                                pos += 1;
-                            }
-                        },
-                        'D' => { // Left
-                            if (pos > 0) {
-                                self.pushOutput("\x08");
-                                pos -= 1;
-                            }
-                        },
-                        'H' => { // Home
-                            self.moveCursorLeft(pos);
-                            pos = 0;
-                        },
-                        'F' => { // End
-                            self.moveCursorRight(buf[0..len], pos, len - pos);
-                            pos = len;
-                        },
-                        else => {},
-                    }
-                }
+                },
             }
         }
 

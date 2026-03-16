@@ -71,6 +71,7 @@ pub const ParserState = enum {
     csi_intermediate,
     osc_string,
     osc_escape, // saw ESC inside OSC, expecting '\'
+    charset_skip, // consume one byte after ESC ( / ) / * / +
 };
 
 const MAX_PARAMS: usize = 16;
@@ -92,6 +93,10 @@ pub const Parser = struct {
             .osc_string => self.handleOsc(byte),
             .osc_escape => {
                 // ESC \ terminates OSC
+                self.state = .ground;
+            },
+            .charset_skip => {
+                // Consume the charset designator byte (B, 0, 1, 2, etc.) and return to ground
                 self.state = .ground;
             },
         }
@@ -141,6 +146,12 @@ pub const Parser = struct {
             },
             ']' => {
                 self.state = .osc_string;
+            },
+            '(', ')', '*', '+' => {
+                // Character set designation — next byte is the charset ID (B, 0, etc.)
+                // We ignore it but need to consume the next byte
+                self.state = .charset_skip;
+                return;
             },
             'c' => {
                 // RIS — full reset

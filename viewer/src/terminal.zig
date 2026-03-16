@@ -646,7 +646,7 @@ pub const Terminal = struct {
         }
     }
 
-    fn pushKey(self: *Terminal, key: u8) void {
+    pub fn pushKey(self: *Terminal, key: u8) void {
         if (self.key_queue_len < self.key_queue.len) {
             self.key_queue[self.key_queue_len] = key;
             self.key_queue_len += 1;
