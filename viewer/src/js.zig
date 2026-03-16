@@ -44,6 +44,9 @@ pub const JsRuntime = struct {
     // Busy flag (worker is executing)
     busy: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // C-visible shutdown flag for QuickJS interrupt handler
+    c_shutdown_flag: c_int = 0,
+
     // Command history for readLine
     history: [128][1024]u8 = undefined,
     history_lens: [128]u16 = .{0} ** 128,
@@ -66,8 +69,10 @@ pub const JsRuntime = struct {
 
     pub fn deinit(self: *JsRuntime) void {
         self.shutdown.store(true, .release);
-        // Unblock readLine/getKey by pushing a dummy key
+        self.c_shutdown_flag = 1; // signal QuickJS interrupt handler
+        // Unblock readLine/getKey by pushing Enter so they return
         self.term.key_mutex.lock();
+        self.term.pushKey(13);
         self.term.pushKey(0);
         self.term.key_mutex.unlock();
         if (self.worker) |w| {
@@ -185,6 +190,9 @@ pub const JsRuntime = struct {
 
         // Store self pointer for callbacks
         c.JS_SetContextOpaque(ctx, @ptrCast(self));
+
+        // Set interrupt handler to abort long-running JS on shutdown
+        c.qjs_set_interrupt_flag(rt, &self.c_shutdown_flag);
 
         // Register built-in functions
         registerBuiltins(ctx, self);
