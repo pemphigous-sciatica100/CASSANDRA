@@ -217,13 +217,19 @@ pub const JsRuntime = struct {
         };
         defer file.close();
 
-        var buf: [32768]u8 = undefined;
-        const n = file.readAll(&buf) catch {
+        // Wrap in IIFE so each script gets its own scope (no global leakage)
+        const prefix = "(function(){";
+        const suffix = "\n})();";
+        var buf: [32768 + 32]u8 = undefined;
+        @memcpy(buf[0..prefix.len], prefix);
+        const n = file.readAll(buf[prefix.len .. buf.len - suffix.len]) catch {
             self.pushOutputFmt("\x1b[1;31mError:\x1b[0m could not read {s}\r\n", .{path});
             return;
         };
+        @memcpy(buf[prefix.len + n ..][0..suffix.len], suffix);
+        const total = prefix.len + n + suffix.len;
 
-        execCode(ctx, self, buf[0..n], path);
+        execCode(ctx, self, buf[0..total], path);
     }
 
     fn printException(ctx: *c.JSContext, self: *JsRuntime) void {
