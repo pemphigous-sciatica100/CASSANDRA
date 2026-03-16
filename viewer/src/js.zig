@@ -365,7 +365,11 @@ pub const JsRuntime = struct {
         _ = c.JS_SetPropertyStr(ctx, term_obj, "rows", c.JS_NewInt32(ctx, @intCast(self.term.rows)));
         _ = c.JS_SetPropertyStr(ctx, term_obj, "rawMode", c.JS_NewCFunction(ctx, jsTermRawMode, "rawMode", 1));
         _ = c.JS_SetPropertyStr(ctx, term_obj, "getKey", c.JS_NewCFunction(ctx, jsTermGetKey, "getKey", 0));
+        _ = c.JS_SetPropertyStr(ctx, term_obj, "readLine", c.JS_NewCFunction(ctx, jsTermReadLine, "readLine", 0));
         _ = c.JS_SetPropertyStr(ctx, global, "term", term_obj);
+
+        // exec(filename) — run a JS file in its own scope
+        _ = c.JS_SetPropertyStr(ctx, global, "exec", c.JS_NewCFunction(ctx, jsExec, "exec", 1));
 
         // fs object
         const fs_obj = c.JS_NewObject(ctx);
@@ -541,6 +545,103 @@ pub const JsRuntime = struct {
         };
 
         return c.JS_NewStringLen(ctx, result.ptr, result.len);
+    }
+
+    /// term.readLine() — blocking line input with echo and editing. Returns string.
+    fn jsTermReadLine(ctx: ?*c.JSContext, _: c.JSValue, _: c_int, _: [*c]c.JSValue) callconv(.c) c.JSValue {
+        const self = getSelf(ctx);
+        const trm = self.term;
+
+        // Enable raw mode for character-by-character input
+        const was_raw = trm.raw_mode;
+        trm.raw_mode = true;
+        trm.key_mutex.lock();
+        trm.key_queue_len = 0;
+        trm.key_mutex.unlock();
+
+        var buf: [1024]u8 = undefined;
+        var len: usize = 0;
+
+        while (!self.shutdown.load(.acquire)) {
+            var key_buf: [8]u8 = undefined;
+            const key_len = trm.readKeySeq(&key_buf);
+            if (key_len == 0) {
+                std.time.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+
+            if (key_len == 1) {
+                switch (key_buf[0]) {
+                    13 => { // Enter
+                        self.pushOutput("\r\n");
+                        break;
+                    },
+                    8 => { // Backspace
+                        if (len > 0) {
+                            len -= 1;
+                            self.pushOutput("\x08 \x08");
+                        }
+                    },
+                    27 => {}, // Escape — ignore
+                    else => {
+                        if (key_buf[0] >= 32 and key_buf[0] < 127 and len < buf.len) {
+                            buf[len] = key_buf[0];
+                            len += 1;
+                            self.pushOutput(key_buf[0..1]);
+                        }
+                    },
+                }
+            }
+            // Arrow keys etc. — ignore for readLine
+        }
+
+        trm.raw_mode = was_raw;
+        return c.JS_NewStringLen(ctx, &buf, len);
+    }
+
+    /// exec(filename) — run a JS file in its own IIFE scope
+    fn jsExec(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 1) return c.qjs_undefined();
+        const real_ctx = ctx orelse return c.qjs_undefined();
+        const path_c = c.JS_ToCString(real_ctx, argv[0]);
+        if (path_c == null) return c.qjs_undefined();
+        defer c.JS_FreeCString(real_ctx, path_c);
+        const path = cStrToSlice(path_c);
+
+        const self = getSelf(ctx);
+
+        const file = std.fs.cwd().openFile(path, .{}) catch {
+            self.pushOutputFmt("\x1b[1;31mError:\x1b[0m could not open {s}\r\n", .{path});
+            return c.qjs_false();
+        };
+        defer file.close();
+
+        const prefix = "(function(){";
+        const suffix = "\n})();";
+        var code_buf: [32768 + 32]u8 = undefined;
+        @memcpy(code_buf[0..prefix.len], prefix);
+        const n = file.readAll(code_buf[prefix.len .. code_buf.len - suffix.len]) catch {
+            self.pushOutputFmt("\x1b[1;31mError:\x1b[0m could not read {s}\r\n", .{path});
+            return c.qjs_false();
+        };
+        @memcpy(code_buf[prefix.len + n ..][0..suffix.len], suffix);
+        const total = prefix.len + n + suffix.len;
+        code_buf[total] = 0;
+
+        var file_z: [256]u8 = undefined;
+        const fl = @min(path.len, file_z.len - 1);
+        @memcpy(file_z[0..fl], path[0..fl]);
+        file_z[fl] = 0;
+
+        const val = c.JS_Eval(real_ctx, &code_buf, total, &file_z, c.JS_EVAL_TYPE_GLOBAL);
+        defer c.JS_FreeValue(real_ctx, val);
+
+        if (c.qjs_is_exception(val) != 0) {
+            printException(real_ctx, self);
+            return c.qjs_false();
+        }
+
+        return c.qjs_true();
     }
 
     // ---------------------------------------------------------------

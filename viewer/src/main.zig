@@ -154,11 +154,8 @@ pub fn main() !void {
     js.init(&term);
     defer js.deinit();
 
-    // Welcome message
-    term.write("\x1b[1;32mCASSANDRA Terminal\x1b[0m v1.0\r\n");
-    term.write("\x1b[36m-----------------------------\x1b[0m\r\n");
-    term.write("Type \x1b[1;33mhelp\x1b[0m for commands, \x1b[1;33mjs <code>\x1b[0m to eval JavaScript\r\n\r\n");
-    term.showPrompt();
+    // Auto-run shell.js when terminal first opens
+    var shell_started = false;
     defer fx.deinit();
 
     // Overlay persistence DB
@@ -307,98 +304,30 @@ pub fn main() !void {
             term.focused = term.visible;
         }
 
-        // Terminal input takes priority when focused
-        // Always drain JS output (even if terminal not focused, scripts may be running)
+        // Terminal — drain JS output every frame
         js.drainOutput();
 
         if (term.focused) {
             term.handleInput();
             term.update(rl.getFrameTime());
 
-            // Process commands
-            if (term.getCommand()) |cmd| {
-                // Check for built-in commands first (no piping)
-                if (std.mem.eql(u8, cmd, "help")) {
-                    term.write("\x1b[1;36mBuilt-in commands:\x1b[0m\r\n");
-                    term.write("  \x1b[1;33mclear\x1b[0m         - Clear terminal\r\n");
-                    term.write("  \x1b[1;33mjs <code>\x1b[0m     - Evaluate JavaScript\r\n");
-                    term.write("  \x1b[1;33mquit\x1b[0m          - Close terminal\r\n");
-                    term.write("\r\n\x1b[1;36mPrograms:\x1b[0m (drop .js files in scripts/)\r\n");
-                    listScripts(&term);
-                    term.write("\r\n\x1b[1;36mPipes:\x1b[0m  cmd1 | cmd2 | cmd3\r\n");
-                    term.write("\r\n\x1b[1;36mJS API:\x1b[0m print() clear() sleep() term.* fs.*\r\n");
-                    term.write("  \x1b[33m__stdin\x1b[0m / \x1b[33m__piped\x1b[0m  - piped input\r\n");
-                } else if (std.mem.eql(u8, cmd, "clear")) {
-                    term.write("\x1b[2J\x1b[H");
-                } else if (std.mem.eql(u8, cmd, "quit") or std.mem.eql(u8, cmd, "exit")) {
-                    term.visible = false;
-                    term.focused = false;
-                } else if (cmd.len > 3 and std.mem.eql(u8, cmd[0..3], "js ")) {
-                    js.eval(cmd[3..], "<terminal>");
-                } else if (cmd.len > 0) {
-                    // Parse pipeline: split on |
-                    var pipeline: js_mod.Job = .{};
-                    pipeline.stage_count = 0;
-
-                    var pipe_iter = std.mem.splitScalar(u8, cmd, '|');
-                    var all_resolved = true;
-
-                    while (pipe_iter.next()) |raw_stage| {
-                        if (pipeline.stage_count >= js_mod.MAX_PIPE_STAGES) break;
-
-                        // Trim whitespace
-                        const stage_cmd = std.mem.trim(u8, raw_stage, " ");
-                        if (stage_cmd.len == 0) continue;
-
-                        // Split into name and args
-                        var scmd_name = stage_cmd;
-                        var scmd_args: []const u8 = "";
-                        if (std.mem.indexOf(u8, stage_cmd, " ")) |si| {
-                            scmd_name = stage_cmd[0..si];
-                            scmd_args = stage_cmd[si + 1 ..];
-                        }
-
-                        var stage = &pipeline.stages[pipeline.stage_count];
-                        stage.is_file = false;
-                        stage.code_len = 0;
-                        stage.filename_len = 0;
-
-                        // Set __args for this stage
-                        var args_setup: [2048]u8 = undefined;
-                        const args_code = std.fmt.bufPrint(&args_setup, "globalThis.__args = \"{s}\";", .{scmd_args}) catch "";
-
-                        // Resolve script path
-                        var path_buf: [512]u8 = undefined;
-                        const script_path = findScript(scmd_name, &path_buf);
-
-                        if (script_path) |sp| {
-                            // Build: set args then load file
-                            // We combine args setup + file execution as code
-                            // by wrapping: eval(__args setup); then load file as separate stage
-                            // Simpler: inject args code as prefix
-                            if (args_code.len > 0) {
-                                @memcpy(stage.code[0..args_code.len], args_code);
-                                stage.code_len = args_code.len;
-                            }
-                            stage.is_file = true;
-                            @memcpy(stage.filename[0..sp.len], sp);
-                            stage.filename_len = sp.len;
-                        } else {
-                            // Not found
-                            term.print("\x1b[1;31mUnknown command:\x1b[0m {s}\r\n", .{scmd_name});
-                            all_resolved = false;
-                            break;
-                        }
-
-                        pipeline.stage_count += 1;
-                    }
-
-                    if (all_resolved and pipeline.stage_count > 0) {
-                        js.submitPipeline(pipeline);
-                    }
+            // Launch shell.js on first focus
+            if (!shell_started) {
+                shell_started = true;
+                // Find shell.js
+                var shell_path_buf: [512]u8 = undefined;
+                const shell_path = findScript("shell", &shell_path_buf);
+                if (shell_path) |sp| {
+                    js.evalFile(sp);
+                } else {
+                    term.write("\x1b[1;31mshell.js not found!\x1b[0m\r\n");
                 }
-                term.showPrompt();
             }
+        }
+
+        // If terminal was closed by shell (quit command), reset for next open
+        if (!term.visible and shell_started and !js.isBusy()) {
+            shell_started = false;
         }
 
         if (!term.focused) fx.handleInput();
