@@ -8,13 +8,19 @@ pub const c = @cImport({
 
 const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_JOBS: usize = 16;
+pub const MAX_PIPE_STAGES: usize = 8;
 
-const Job = struct {
+pub const JobStage = struct {
     code: [32768]u8 = undefined,
     code_len: usize = 0,
     filename: [256]u8 = undefined,
     filename_len: usize = 0,
     is_file: bool = false,
+};
+
+pub const Job = struct {
+    stages: [MAX_PIPE_STAGES]JobStage = undefined,
+    stage_count: usize = 1,
 };
 
 /// Thread-safe JavaScript runtime with worker thread.
@@ -36,6 +42,11 @@ pub const JsRuntime = struct {
 
     // Busy flag (worker is executing)
     busy: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    // Capture mode for pipe stages (worker thread only — no mutex needed)
+    capturing: bool = false,
+    capture_buf: [MAX_OUTPUT]u8 = undefined,
+    capture_len: usize = 0,
 
     // Terminal ref (for reading dimensions — main thread only for actual writes)
     term: *terminal_mod.Terminal = undefined,
@@ -61,13 +72,15 @@ pub const JsRuntime = struct {
         if (self.job_count >= MAX_JOBS) return;
 
         var job = &self.jobs[self.job_count];
-        job.is_file = false;
-        const cl = @min(code.len, job.code.len - 1);
-        @memcpy(job.code[0..cl], code[0..cl]);
-        job.code_len = cl;
-        const fl = @min(filename.len, job.filename.len - 1);
-        @memcpy(job.filename[0..fl], filename[0..fl]);
-        job.filename_len = fl;
+        job.stage_count = 1;
+        var stage = &job.stages[0];
+        stage.is_file = false;
+        const cl = @min(code.len, stage.code.len - 1);
+        @memcpy(stage.code[0..cl], code[0..cl]);
+        stage.code_len = cl;
+        const fl = @min(filename.len, stage.filename.len - 1);
+        @memcpy(stage.filename[0..fl], filename[0..fl]);
+        stage.filename_len = fl;
         self.job_count += 1;
     }
 
@@ -78,11 +91,22 @@ pub const JsRuntime = struct {
         if (self.job_count >= MAX_JOBS) return;
 
         var job = &self.jobs[self.job_count];
-        job.is_file = true;
-        const pl = @min(path.len, job.filename.len - 1);
-        @memcpy(job.filename[0..pl], path[0..pl]);
-        job.filename_len = pl;
-        job.code_len = 0;
+        job.stage_count = 1;
+        var stage = &job.stages[0];
+        stage.is_file = true;
+        const pl = @min(path.len, stage.filename.len - 1);
+        @memcpy(stage.filename[0..pl], path[0..pl]);
+        stage.filename_len = pl;
+        stage.code_len = 0;
+        self.job_count += 1;
+    }
+
+    /// Submit a multi-stage pipeline job.
+    pub fn submitPipeline(self: *JsRuntime, job: Job) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.job_count >= MAX_JOBS) return;
+        self.jobs[self.job_count] = job;
         self.job_count += 1;
     }
 
@@ -108,8 +132,18 @@ pub const JsRuntime = struct {
         self.term.write(local[0..n]);
     }
 
-    /// Push output bytes from the worker thread (thread-safe).
+    /// Push output bytes from the worker thread.
+    /// In capture mode, goes to capture buffer; otherwise to terminal output.
     fn pushOutput(self: *JsRuntime, data: []const u8) void {
+        if (self.capturing) {
+            const avail = MAX_OUTPUT - self.capture_len;
+            const n = @min(data.len, avail);
+            if (n > 0) {
+                @memcpy(self.capture_buf[self.capture_len..][0..n], data[0..n]);
+                self.capture_len += n;
+            }
+            return;
+        }
         self.output_mutex.lock();
         defer self.output_mutex.unlock();
         const avail = MAX_OUTPUT - self.output_len;
@@ -165,10 +199,60 @@ pub const JsRuntime = struct {
             if (job) |j| {
                 self.busy.store(true, .release);
 
-                if (j.is_file) {
-                    execFile(ctx, self, j.filename[0..j.filename_len]);
-                } else {
-                    execCode(ctx, self, j.code[0..j.code_len], j.filename[0..j.filename_len]);
+                // Execute pipeline stages
+                var stdin_data: [MAX_OUTPUT]u8 = undefined;
+                var stdin_len: usize = 0;
+
+                for (0..j.stage_count) |si| {
+                    const stage = j.stages[si];
+                    const is_last = (si == j.stage_count - 1);
+
+                    // Set __stdin and __piped globals
+                    {
+                        var js_code: [MAX_OUTPUT + 128]u8 = undefined;
+                        // Escape the stdin content for JS string
+                        const stdin_slice = stdin_data[0..stdin_len];
+                        const set_code = std.fmt.bufPrint(&js_code, "globalThis.__piped = {s}; globalThis.__stdin = globalThis.__piped ? globalThis.__stdin : \"\";", .{if (stdin_len > 0) "true" else "false"}) catch "";
+                        if (set_code.len > 0) execCode(ctx, self, set_code, "<pipe>");
+
+                        // Set stdin via a separate mechanism — store as a property
+                        if (stdin_len > 0) {
+                            const global = c.JS_GetGlobalObject(ctx);
+                            const js_str = c.JS_NewStringLen(ctx, &stdin_data, stdin_len);
+                            _ = c.JS_SetPropertyStr(ctx, global, "__stdin", js_str);
+                            c.JS_FreeValue(ctx, global);
+                        } else {
+                            const global = c.JS_GetGlobalObject(ctx);
+                            _ = c.JS_SetPropertyStr(ctx, global, "__stdin", c.JS_NewStringLen(ctx, "", 0));
+                            c.JS_FreeValue(ctx, global);
+                        }
+                        _ = stdin_slice;
+                    }
+
+                    // Capture mode for non-last stages
+                    self.capturing = !is_last;
+                    self.capture_len = 0;
+
+                    // Run args setup code if present
+                    if (stage.code_len > 0) {
+                        execCode(ctx, self, stage.code[0..stage.code_len], "<args>");
+                    }
+
+                    if (stage.is_file) {
+                        execFile(ctx, self, stage.filename[0..stage.filename_len]);
+                    } else if (stage.code_len > 0 and !stage.is_file) {
+                        // Already ran as code above
+                    } else {
+                        execCode(ctx, self, stage.code[0..stage.code_len], stage.filename[0..stage.filename_len]);
+                    }
+
+                    // Collect captured output as stdin for next stage
+                    if (!is_last) {
+                        const copy_len = @min(self.capture_len, stdin_data.len);
+                        @memcpy(stdin_data[0..copy_len], self.capture_buf[0..copy_len]);
+                        stdin_len = copy_len;
+                    }
+                    self.capturing = false;
                 }
 
                 self.busy.store(false, .release);

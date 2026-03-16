@@ -19,7 +19,7 @@ pub const Attrs = packed struct(u16) {
 };
 
 pub const Cell = struct {
-    char: u8 = ' ',
+    char: u21 = ' ',
     fg: rl.Color = Terminal.DEFAULT_FG,
     bg: rl.Color = Terminal.DEFAULT_BG,
     attrs: Attrs = .{},
@@ -79,6 +79,11 @@ pub const Terminal = struct {
     alt_cursor_col: u16 = 0,
     using_alt: bool = false,
 
+    // UTF-8 decoder state
+    utf8_buf: [4]u8 = undefined,
+    utf8_len: u8 = 0,
+    utf8_expected: u8 = 0,
+
     // Parser
     parser: parser_mod.Parser = .{},
 
@@ -122,21 +127,28 @@ pub const Terminal = struct {
         self.font_size = font_sz;
         self.scroll_bottom = self.rows - 1;
 
-        // Load IBM VGA bitmap font — includes CP437 box-drawing characters
-        // Load codepoint range 0x20-0x25FF to cover ASCII, Latin, box-drawing, block elements
+        // Load a good Unicode monospace font
+        // Codepoint range 0x20-0x25FF covers ASCII, Latin, box-drawing, block elements
         var codepoints: [9696]c_int = undefined;
         for (0..9696) |i| {
             codepoints[i] = @intCast(i + 0x20);
         }
-        self.font = rl.c.LoadFontEx("data/Px437_IBM_VGA_8x16.ttf", @intFromFloat(font_sz), &codepoints, 9696);
-        if (self.font.glyphCount == 0) {
-            // Try relative to viewer dir
-            self.font = rl.c.LoadFontEx("viewer/data/Px437_IBM_VGA_8x16.ttf", @intFromFloat(font_sz), &codepoints, 9696);
+        const font_paths = [_][*:0]const u8{
+            "/usr/share/fonts/TTF/CascadiaMono.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+            "data/Px437_IBM_VGA_8x16.ttf",
+            "viewer/data/Px437_IBM_VGA_8x16.ttf",
+        };
+        self.font = rl.c.GetFontDefault(); // fallback
+        for (font_paths) |path| {
+            const f = rl.c.LoadFontEx(path, @intFromFloat(font_sz), &codepoints, 9696);
+            if (f.glyphCount > 0) {
+                self.font = f;
+                break;
+            }
         }
-        if (self.font.glyphCount == 0) {
-            self.font = rl.c.GetFontDefault();
-        }
-        rl.c.SetTextureFilter(self.font.texture, rl.c.TEXTURE_FILTER_POINT); // crispy pixels!
+        rl.c.SetTextureFilter(self.font.texture, rl.c.TEXTURE_FILTER_BILINEAR);
 
         // Measure cell dimensions
         const m = rl.c.MeasureTextEx(self.font, "M", font_sz, 0);
@@ -177,8 +189,61 @@ pub const Terminal = struct {
 
     pub fn write(self: *Terminal, data: []const u8) void {
         for (data) |byte| {
-            self.parser.feed(self, byte);
+            // UTF-8 decoding: accumulate multi-byte sequences
+            if (self.utf8_expected > 0) {
+                if (byte & 0xC0 == 0x80) {
+                    // Continuation byte
+                    self.utf8_buf[self.utf8_len] = byte;
+                    self.utf8_len += 1;
+                    if (self.utf8_len == self.utf8_expected) {
+                        // Complete — decode codepoint
+                        const cp = decodeUtf8(self.utf8_buf[0..self.utf8_len]);
+                        self.utf8_expected = 0;
+                        self.utf8_len = 0;
+                        if (cp) |c| {
+                            if (self.cursor_col >= self.cols) {
+                                self.cursor_col = 0;
+                                self.linefeed();
+                            }
+                            const idx = self.cellIdx(self.cursor_row, self.cursor_col);
+                            var cell = &self.cells_back[idx];
+                            cell.char = c;
+                            cell.fg = self.current_fg;
+                            cell.bg = self.current_bg;
+                            cell.attrs = self.current_attrs;
+                            self.markDirty(self.cursor_row);
+                            self.cursor_col += 1;
+                        }
+                    }
+                } else {
+                    // Invalid sequence — discard and re-process this byte
+                    self.utf8_expected = 0;
+                    self.utf8_len = 0;
+                    self.parser.feed(self, byte);
+                }
+            } else if (byte >= 0xC0 and byte < 0xF8) {
+                // Start of multi-byte UTF-8 sequence
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                if (byte < 0xE0) self.utf8_expected = 2
+                else if (byte < 0xF0) self.utf8_expected = 3
+                else self.utf8_expected = 4;
+            } else {
+                // ASCII or control — goes through the ANSI parser
+                self.parser.feed(self, byte);
+            }
         }
+    }
+
+    fn decodeUtf8(bytes: []const u8) ?u21 {
+        if (bytes.len == 2) {
+            return @as(u21, bytes[0] & 0x1F) << 6 | @as(u21, bytes[1] & 0x3F);
+        } else if (bytes.len == 3) {
+            return @as(u21, bytes[0] & 0x0F) << 12 | @as(u21, bytes[1] & 0x3F) << 6 | @as(u21, bytes[2] & 0x3F);
+        } else if (bytes.len == 4) {
+            return @as(u21, bytes[0] & 0x07) << 18 | @as(u21, bytes[1] & 0x3F) << 12 | @as(u21, bytes[2] & 0x3F) << 6 | @as(u21, bytes[3] & 0x3F);
+        }
+        return null;
     }
 
     /// Write a formatted string
@@ -192,7 +257,7 @@ pub const Terminal = struct {
     // Character output (called by parser)
     // ---------------------------------------------------------------
 
-    pub fn putChar(self: *Terminal, ch: u8) void {
+    pub fn putChar(self: *Terminal, ch: u21) void {
         if (self.cursor_col >= self.cols) {
             // Auto-wrap
             self.cursor_col = 0;

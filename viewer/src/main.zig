@@ -46,6 +46,18 @@ fn listScripts(term: *terminal_mod.Terminal) void {
     }
 }
 
+fn findScript(name: []const u8, buf: *[512]u8) ?[]const u8 {
+    // Try ../scripts/<name>.js (running from viewer/)
+    const p1 = std.fmt.bufPrint(buf, "../scripts/{s}.js", .{name}) catch return null;
+    if (std.fs.cwd().access(p1, .{})) |_| return p1 else |_| {}
+
+    // Try scripts/<name>.js (running from project root)
+    const p2 = std.fmt.bufPrint(buf, "scripts/{s}.js", .{name}) catch return null;
+    if (std.fs.cwd().access(p2, .{})) |_| return p2 else |_| {}
+
+    return null;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -305,76 +317,84 @@ pub fn main() !void {
 
             // Process commands
             if (term.getCommand()) |cmd| {
-                // Built-in commands
+                // Check for built-in commands first (no piping)
                 if (std.mem.eql(u8, cmd, "help")) {
                     term.write("\x1b[1;36mBuilt-in commands:\x1b[0m\r\n");
                     term.write("  \x1b[1;33mclear\x1b[0m         - Clear terminal\r\n");
                     term.write("  \x1b[1;33mjs <code>\x1b[0m     - Evaluate JavaScript\r\n");
                     term.write("  \x1b[1;33mquit\x1b[0m          - Close terminal\r\n");
                     term.write("\r\n\x1b[1;36mPrograms:\x1b[0m (drop .js files in scripts/)\r\n");
-                    // List available .js programs
                     listScripts(&term);
-                    term.write("\r\n\x1b[1;36mJavaScript API:\x1b[0m\r\n");
-                    term.write("  \x1b[33mprint(...)\x1b[0m       - Print to terminal\r\n");
-                    term.write("  \x1b[33mclear()\x1b[0m          - Clear screen\r\n");
-                    term.write("  \x1b[33mterm.write(s)\x1b[0m    - Raw write (ANSI supported)\r\n");
-                    term.write("  \x1b[33mterm.cursor(r,c)\x1b[0m - Move cursor\r\n");
-                    term.write("  \x1b[33mterm.color(name)\x1b[0m - Set color (red/green/cyan/...)\r\n");
-                    term.write("  \x1b[33mterm.reset()\x1b[0m     - Reset colors\r\n");
-                    term.write("  \x1b[33mterm.cols/rows\x1b[0m   - Terminal dimensions\r\n");
-                } else if (std.mem.eql(u8, cmd, "ls") or std.mem.eql(u8, cmd, "dir")) {
-                    term.write("\x1b[1;36mPrograms:\x1b[0m\r\n");
-                    listScripts(&term);
+                    term.write("\r\n\x1b[1;36mPipes:\x1b[0m  cmd1 | cmd2 | cmd3\r\n");
+                    term.write("\r\n\x1b[1;36mJS API:\x1b[0m print() clear() sleep() term.* fs.*\r\n");
+                    term.write("  \x1b[33m__stdin\x1b[0m / \x1b[33m__piped\x1b[0m  - piped input\r\n");
                 } else if (std.mem.eql(u8, cmd, "clear")) {
                     term.write("\x1b[2J\x1b[H");
                 } else if (std.mem.eql(u8, cmd, "quit") or std.mem.eql(u8, cmd, "exit")) {
                     term.visible = false;
                     term.focused = false;
                 } else if (cmd.len > 3 and std.mem.eql(u8, cmd[0..3], "js ")) {
-                    // Inline JavaScript evaluation
                     js.eval(cmd[3..], "<terminal>");
                 } else if (cmd.len > 0) {
-                    // Try to find and run a .js program
-                    // Split command into name and args
-                    var cmd_name = cmd;
-                    var cmd_args: []const u8 = "";
-                    if (std.mem.indexOf(u8, cmd, " ")) |space_idx| {
-                        cmd_name = cmd[0..space_idx];
-                        cmd_args = cmd[space_idx + 1 ..];
+                    // Parse pipeline: split on |
+                    var pipeline: js_mod.Job = .{};
+                    pipeline.stage_count = 0;
+
+                    var pipe_iter = std.mem.splitScalar(u8, cmd, '|');
+                    var all_resolved = true;
+
+                    while (pipe_iter.next()) |raw_stage| {
+                        if (pipeline.stage_count >= js_mod.MAX_PIPE_STAGES) break;
+
+                        // Trim whitespace
+                        const stage_cmd = std.mem.trim(u8, raw_stage, " ");
+                        if (stage_cmd.len == 0) continue;
+
+                        // Split into name and args
+                        var scmd_name = stage_cmd;
+                        var scmd_args: []const u8 = "";
+                        if (std.mem.indexOf(u8, stage_cmd, " ")) |si| {
+                            scmd_name = stage_cmd[0..si];
+                            scmd_args = stage_cmd[si + 1 ..];
+                        }
+
+                        var stage = &pipeline.stages[pipeline.stage_count];
+                        stage.is_file = false;
+                        stage.code_len = 0;
+                        stage.filename_len = 0;
+
+                        // Set __args for this stage
+                        var args_setup: [2048]u8 = undefined;
+                        const args_code = std.fmt.bufPrint(&args_setup, "globalThis.__args = \"{s}\";", .{scmd_args}) catch "";
+
+                        // Resolve script path
+                        var path_buf: [512]u8 = undefined;
+                        const script_path = findScript(scmd_name, &path_buf);
+
+                        if (script_path) |sp| {
+                            // Build: set args then load file
+                            // We combine args setup + file execution as code
+                            // by wrapping: eval(__args setup); then load file as separate stage
+                            // Simpler: inject args code as prefix
+                            if (args_code.len > 0) {
+                                @memcpy(stage.code[0..args_code.len], args_code);
+                                stage.code_len = args_code.len;
+                            }
+                            stage.is_file = true;
+                            @memcpy(stage.filename[0..sp.len], sp);
+                            stage.filename_len = sp.len;
+                        } else {
+                            // Not found
+                            term.print("\x1b[1;31mUnknown command:\x1b[0m {s}\r\n", .{scmd_name});
+                            all_resolved = false;
+                            break;
+                        }
+
+                        pipeline.stage_count += 1;
                     }
 
-                    // Set args as a global JS variable before running
-                    if (cmd_args.len > 0) {
-                        var args_js: [2048]u8 = undefined;
-                        const args_code = std.fmt.bufPrint(&args_js, "globalThis.__args = \"{s}\";", .{cmd_args}) catch "";
-                        if (args_code.len > 0) js.eval(args_code, "<args>");
-                    } else {
-                        js.eval("globalThis.__args = \"\";", "<args>");
-                    }
-
-                    // Search paths for <cmd>.js
-                    var path_buf: [512]u8 = undefined;
-
-                    const found = blk: {
-                        // Try ../scripts/<cmd>.js (running from viewer/)
-                        const p1 = std.fmt.bufPrint(&path_buf, "../scripts/{s}.js", .{cmd_name}) catch break :blk false;
-                        if (std.fs.cwd().access(p1, .{})) |_| {
-                            js.evalFile(p1);
-                            break :blk true;
-                        } else |_| {}
-
-                        // Try scripts/<cmd>.js (running from project root)
-                        const p2 = std.fmt.bufPrint(&path_buf, "scripts/{s}.js", .{cmd_name}) catch break :blk false;
-                        if (std.fs.cwd().access(p2, .{})) |_| {
-                            js.evalFile(p2);
-                            break :blk true;
-                        } else |_| {}
-
-                        break :blk false;
-                    };
-
-                    if (!found) {
-                        term.print("\x1b[1;31mUnknown command:\x1b[0m {s}\r\n", .{cmd});
+                    if (all_resolved and pipeline.stage_count > 0) {
+                        js.submitPipeline(pipeline);
                     }
                 }
                 term.showPrompt();
