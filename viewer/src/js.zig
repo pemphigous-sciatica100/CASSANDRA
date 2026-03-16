@@ -43,6 +43,12 @@ pub const JsRuntime = struct {
     // Busy flag (worker is executing)
     busy: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
+    // Command history for readLine
+    history: [128][1024]u8 = undefined,
+    history_lens: [128]u16 = .{0} ** 128,
+    history_count: usize = 0,
+    history_head: usize = 0, // write position (ring buffer)
+
     // Capture mode for pipe stages (worker thread only — no mutex needed)
     capturing: bool = false,
     capture_buf: [MAX_OUTPUT]u8 = undefined,
@@ -548,12 +554,11 @@ pub const JsRuntime = struct {
         return c.JS_NewStringLen(ctx, result.ptr, result.len);
     }
 
-    /// term.readLine() — blocking line input with echo and editing. Returns string.
+    /// term.readLine() — blocking line input with echo, editing, and history. Returns string.
     fn jsTermReadLine(ctx: ?*c.JSContext, _: c.JSValue, _: c_int, _: [*c]c.JSValue) callconv(.c) c.JSValue {
         const self = getSelf(ctx);
         const trm = self.term;
 
-        // Enable raw mode for character-by-character input
         const was_raw = trm.raw_mode;
         trm.raw_mode = true;
         trm.key_mutex.lock();
@@ -562,6 +567,9 @@ pub const JsRuntime = struct {
 
         var buf: [1024]u8 = undefined;
         var len: usize = 0;
+        var hist_idx: isize = -1; // -1 = current input, 0 = most recent, etc.
+        var saved_buf: [1024]u8 = undefined; // save current input when browsing history
+        var saved_len: usize = 0;
 
         while (!self.shutdown.load(.acquire)) {
             var key_buf: [8]u8 = undefined;
@@ -575,6 +583,10 @@ pub const JsRuntime = struct {
                 switch (key_buf[0]) {
                     13 => { // Enter
                         self.pushOutput("\r\n");
+                        // Save to history if non-empty
+                        if (len > 0) {
+                            self.addHistory(buf[0..len]);
+                        }
                         break;
                     },
                     8 => { // Backspace
@@ -583,7 +595,7 @@ pub const JsRuntime = struct {
                             self.pushOutput("\x08 \x08");
                         }
                     },
-                    27 => {}, // Escape — ignore
+                    27 => {}, // Escape alone — ignore
                     else => {
                         if (key_buf[0] >= 32 and key_buf[0] < 127 and len < buf.len) {
                             buf[len] = key_buf[0];
@@ -592,12 +604,77 @@ pub const JsRuntime = struct {
                         }
                     },
                 }
+            } else if (key_len >= 3 and key_buf[0] == 27 and key_buf[1] == '[') {
+                switch (key_buf[2]) {
+                    'A' => { // Up — previous history
+                        const max_idx: isize = @intCast(self.history_count);
+                        if (hist_idx + 1 < max_idx) {
+                            // Save current input on first up-press
+                            if (hist_idx == -1) {
+                                @memcpy(saved_buf[0..len], buf[0..len]);
+                                saved_len = len;
+                            }
+                            hist_idx += 1;
+                            self.loadHistory(hist_idx, &buf, &len);
+                        }
+                    },
+                    'B' => { // Down — next history / back to current
+                        if (hist_idx > 0) {
+                            hist_idx -= 1;
+                            self.loadHistory(hist_idx, &buf, &len);
+                        } else if (hist_idx == 0) {
+                            // Restore saved current input
+                            hist_idx = -1;
+                            self.eraseLine(len);
+                            @memcpy(buf[0..saved_len], saved_buf[0..saved_len]);
+                            len = saved_len;
+                            self.pushOutput(buf[0..len]);
+                        }
+                    },
+                    else => {},
+                }
             }
-            // Arrow keys etc. — ignore for readLine
         }
 
         trm.raw_mode = was_raw;
         return c.JS_NewStringLen(ctx, &buf, len);
+    }
+
+    fn addHistory(self: *JsRuntime, line: []const u8) void {
+        const idx = self.history_head;
+        const copy_len = @min(line.len, self.history[idx].len);
+        @memcpy(self.history[idx][0..copy_len], line[0..copy_len]);
+        self.history_lens[idx] = @intCast(copy_len);
+        self.history_head = (self.history_head + 1) % self.history.len;
+        if (self.history_count < self.history.len) self.history_count += 1;
+    }
+
+    fn loadHistory(self: *JsRuntime, idx: isize, buf: *[1024]u8, len: *usize) void {
+        if (idx < 0 or idx >= @as(isize, @intCast(self.history_count))) return;
+        // History is stored newest at history_head-1, going backwards
+        const ui: usize = @intCast(idx);
+        const actual = (self.history_head + self.history.len - 1 - ui) % self.history.len;
+        const hlen = self.history_lens[actual];
+
+        // Erase current line on screen
+        self.eraseLine(len.*);
+
+        // Load history entry
+        @memcpy(buf[0..hlen], self.history[actual][0..hlen]);
+        len.* = hlen;
+
+        // Display it
+        self.pushOutput(buf[0..len.*]);
+    }
+
+    fn eraseLine(self: *JsRuntime, len: usize) void {
+        // Move cursor back, overwrite with spaces, move back again
+        var i: usize = 0;
+        while (i < len) : (i += 1) self.pushOutput("\x08");
+        i = 0;
+        while (i < len) : (i += 1) self.pushOutput(" ");
+        i = 0;
+        while (i < len) : (i += 1) self.pushOutput("\x08");
     }
 
     /// exec(filename, capture?) — run a JS file in its own IIFE scope.
