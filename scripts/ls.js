@@ -1,31 +1,30 @@
-// List available programs
-const dirs = ["../scripts", "scripts"];
-let files = null;
+// List files in a directory
+// Usage: ls [path]  (defaults to current directory)
 
-for (const dir of dirs) {
-    files = fs.listDir(dir);
-    if (files) break;
-}
+const path = globalThis.__args || ".";
+const files = fs.listDir(path);
 
-if (!files || files.length === 0) {
-    print("No programs found.");
-} else {
-    term.color("cyan");
-    print("Available programs:");
-    print("-------------------");
+if (!files) {
+    term.color("red");
+    print("Cannot open: " + path);
     term.reset();
-
-    const programs = files
-        .filter(f => f.endsWith(".js"))
-        .map(f => f.slice(0, -3))
-        .sort();
-
-    for (const name of programs) {
-        term.write("  ");
-        term.color("yellow");
-        print(name);
-        term.reset();
+} else {
+    const sorted = files.sort();
+    for (const name of sorted) {
+        // Color directories differently (heuristic: no extension = likely dir)
+        const isDir = !name.includes(".") || name.startsWith(".");
+        if (isDir) {
+            term.color("cyan");
+            print(name + "/");
+        } else if (name.endsWith(".js")) {
+            term.color("green");
+            print(name);
+        } else {
+            term.reset();
+            print(name);
+        }
     }
+    term.reset();
     print("");
-    print(programs.length + " program(s)");
+    print(sorted.length + " item(s)");
 }
