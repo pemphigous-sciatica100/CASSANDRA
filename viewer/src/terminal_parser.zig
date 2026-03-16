@@ -128,7 +128,10 @@ pub const Parser = struct {
                 term.cursor_col = @min(next, term.cols - 1);
             },
             0x08 => { // Backspace
-                if (term.cursor_col > 0) term.cursor_col -= 1;
+                if (term.cursor_col > 0) {
+                    term.cursor_col -= 1;
+                    term.markDirty(term.cursor_row);
+                }
             },
             0x07 => {}, // BEL — ignore
             0x00...0x06, 0x0E...0x1A, 0x1C...0x1F => {}, // other C0 — ignore

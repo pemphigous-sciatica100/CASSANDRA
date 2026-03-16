@@ -660,6 +660,11 @@ pub const Terminal = struct {
     fn pasteClipboard(self: *Terminal) void {
         const clip = rl.c.GetClipboardText();
         if (clip == null) return;
+
+        // Drain GetCharPressed — Raylib may also queue pasted chars there,
+        // which would cause duplicates
+        while (rl.c.GetCharPressed() != 0) {}
+
         var i: usize = 0;
         while (clip[i] != 0 and self.key_queue_len < self.key_queue.len) : (i += 1) {
             // Convert \n to \r for terminal (enter key)
@@ -946,7 +951,7 @@ pub const Terminal = struct {
         }
     }
 
-    fn markDirty(self: *Terminal, row: u16) void {
+    pub fn markDirty(self: *Terminal, row: u16) void {
         self.dirty_rows[row] = true;
         self.any_dirty = true;
     }

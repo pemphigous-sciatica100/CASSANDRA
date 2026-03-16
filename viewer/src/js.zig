@@ -606,14 +606,27 @@ pub const JsRuntime = struct {
                         std.mem.copyForwards(u8, buf[pos - 1 .. len - 1], buf[pos..len]);
                         pos -= 1;
                         len -= 1;
-                        self.redrawFrom(buf[0..len], pos, len + 1);
+                        if (pos == len) {
+                            // Simple case: backspace at end of line
+                            self.pushOutput("\x08 \x08");
+                        } else {
+                            // Middle of line: rewrite from cursor
+                            self.pushOutput("\x08");
+                            self.pushOutput(buf[pos..len]);
+                            self.pushOutput(" "); // clear last char
+                            // Move cursor back to pos
+                            self.moveCursorLeft(len - pos + 1);
+                        }
                     }
                 },
                 127 => { // Delete
                     if (pos < len) {
                         std.mem.copyForwards(u8, buf[pos .. len - 1], buf[pos + 1 .. len]);
                         len -= 1;
-                        self.redrawFrom(buf[0..len], pos, len + 1);
+                        // Rewrite from cursor to end
+                        self.pushOutput(buf[pos..len]);
+                        self.pushOutput(" ");
+                        self.moveCursorLeft(len - pos + 1);
                     }
                 },
                 1 => { // Ctrl-A — home
@@ -720,9 +733,12 @@ pub const JsRuntime = struct {
                         len += 1;
                         pos += 1;
                         if (pos == len) {
+                            // Appending at end
                             self.pushOutput(buf[pos - 1 .. pos]);
                         } else {
-                            self.redrawFrom(buf[0..len], pos - 1, len);
+                            // Inserted in middle — rewrite from insert point
+                            self.pushOutput(buf[pos - 1 .. len]);
+                            self.moveCursorLeft(len - pos);
                         }
                     }
                 },
