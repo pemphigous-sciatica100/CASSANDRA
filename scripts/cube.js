@@ -1,27 +1,13 @@
 // Spinning cube — the simplest 3D demo
-gfx.create(0, 300, 300);
-gfx.move(0, 100, 50);
+exec("../scripts/lib/scene.js");
 
-const GREEN = gfx.rgb(0, 255, 100);
-const CYAN = gfx.rgb(0, 200, 255);
-const WHITE = gfx.rgb(255, 255, 255);
+const scene = new Scene(0, 300, 300);
+scene.position(100, 50);
 
-let t = 0;
-while (true) {
-    gfx.begin(0);
-    gfx.clear(10, 10, 20);
+scene.cube({ size: 1.5, color: gfx.rgb(0, 255, 100) })
+    .behave("rotate")
+    .behave("pulse");
 
-    // Set camera
-    gfx.camera(0, 5.0, 0.4, t * 0.02);
+scene.text({ x: 8, y: 8, label: "CASSANDRA OS", size: 20, color: gfx.rgb(0, 200, 255) });
 
-    // Draw a spinning cube
-    gfx.cube(0, 0, 0, 1.5, GREEN, t * 0.03, t * 0.02);
-
-    // Label
-    gfx.text(8, 8, "CASSANDRA OS", 20, CYAN);
-    gfx.text(8, 280, "Frame " + t, 10, WHITE);
-
-    gfx.end(0);
-    t++;
-    sleep(16);
-}
+scene.run();
