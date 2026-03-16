@@ -185,6 +185,8 @@ Keyboard ──> Terminal (Zig)
 - **Shell** (`scripts/shell.js`) — command interpreter, pipes, script discovery
 - **Programs** (`scripts/*.js`) — user-extensible JavaScript programs
 
+![CASSANDRA Shell with help, programs, and host shell](screenshot_shell.png)
+
 ## Engine
 
 The terminal is powered by [QuickJS](https://bellard.org/quickjs/) (2025-09-13), Fabrice Bellard's lightweight ES2023 JavaScript engine. It is compiled from source as part of the build (vendored in `viewer/vendor/quickjs/`).
