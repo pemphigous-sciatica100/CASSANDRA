@@ -322,7 +322,9 @@ pub const DisplayManager = struct {
             const h: f32 = @floatFromInt(tex.height);
             const src = rl.c.Rectangle{ .x = 0, .y = 0, .width = w, .height = -h };
             const dst = rl.c.Rectangle{ .x = d.screen_x, .y = d.screen_y, .width = w, .height = h };
+            rl.c.BeginBlendMode(rl.c.BLEND_ALPHA);
             rl.c.DrawTexturePro(tex, src, dst, .{ .x = 0, .y = 0 }, 0, rl.c.WHITE);
+            rl.c.EndBlendMode();
         }
     }
 
