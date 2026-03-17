@@ -286,10 +286,16 @@ pub const JsRuntime = struct {
                     self.capturing = false;
                 }
 
-                // Clear interrupt flag after execution
+                // Clear interrupt flag and clean up displays after execution
                 if (self.c_interrupt_flag != 0) {
                     self.pushOutput("\x1b[1;33m^C\x1b[0m\r\n");
                     self.c_interrupt_flag = 0;
+                    // Destroy any displays left open by the interrupted program
+                    for (0..display_mod.MAX_DISPLAYS) |i| {
+                        if (self.display_mgr.displays[i].active) {
+                            self.display_mgr.ring.push(.{ .tag = .destroy, .display_id = @intCast(i) });
+                        }
+                    }
                 }
 
                 self.busy.store(false, .release);
@@ -467,12 +473,19 @@ pub const JsRuntime = struct {
         return c.qjs_undefined();
     }
 
-    fn jsSleep(_: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+    fn jsSleep(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
         if (argc >= 1) {
+            const self = getSelf(ctx);
             var ms: i32 = 0;
             _ = c.JS_ToInt32(null, &ms, argv[0]);
             if (ms > 0 and ms < 30000) {
-                std.time.sleep(@as(u64, @intCast(ms)) * std.time.ns_per_ms);
+                // Sleep in small chunks so Ctrl+C is responsive
+                var remaining: u64 = @intCast(ms);
+                while (remaining > 0 and self.c_interrupt_flag == 0 and !self.shutdown.load(.acquire)) {
+                    const chunk: u64 = @min(remaining, 10);
+                    std.time.sleep(chunk * @as(u64, std.time.ns_per_ms));
+                    remaining -= chunk;
+                }
             }
         }
         return c.qjs_undefined();
