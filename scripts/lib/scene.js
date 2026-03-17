@@ -84,11 +84,30 @@ Scene.prototype.run = function(fps) {
         // Render
         gfx.begin(this.id);
         if (this.bg) gfx.clear(this.bg[0], this.bg[1], this.bg[2]);
-        gfx.camera(this.id, this.cam.dist, this.cam.pitch, this.cam.yaw);
 
-        for (const obj of this.objects) {
-            if (!obj.visible) continue;
-            this._draw(obj);
+        // Split objects into 3D and 2D
+        const has3d = this.objects.some(o => o.visible && (o.type === "cube"));
+        const has2d = this.objects.some(o => o.visible && o.type !== "cube");
+
+        // Draw 3D objects first
+        if (has3d) {
+            const camX = Math.cos(this.cam.yaw) * Math.cos(this.cam.pitch) * this.cam.dist;
+            const camY = Math.sin(this.cam.pitch) * this.cam.dist;
+            const camZ = Math.sin(this.cam.yaw) * Math.cos(this.cam.pitch) * this.cam.dist;
+            gfx.begin3d(camX, camY, camZ, 0, 0, 0, 45);
+            for (const obj of this.objects) {
+                if (!obj.visible || obj.type !== "cube") continue;
+                this._draw(obj);
+            }
+            gfx.end3d();
+        }
+
+        // Draw 2D objects on top
+        if (has2d) {
+            for (const obj of this.objects) {
+                if (!obj.visible || obj.type === "cube") continue;
+                this._draw(obj);
+            }
         }
 
         gfx.end(this.id);
@@ -102,12 +121,9 @@ Scene.prototype._draw = function(obj) {
     switch (obj.type) {
         case "cube":
             if (obj.solid) {
-                gfx.solidCube(obj.x, obj.y, obj.z, obj.size || 1, c, obj.rx || 0, obj.ry || 0,
-                    obj.lightX !== undefined ? obj.lightX : 1,
-                    obj.lightY !== undefined ? obj.lightY : -1,
-                    obj.lightZ !== undefined ? obj.lightZ : 0.5);
+                gfx.solidCube(obj.x, obj.y, obj.z, obj.size || 1, c);
             } else {
-                gfx.cube(obj.x, obj.y, obj.z, obj.size || 1, c, obj.rx || 0, obj.ry || 0);
+                gfx.cube(obj.x, obj.y, obj.z, obj.size || 1, c);
             }
             break;
         case "line":
