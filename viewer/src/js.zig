@@ -203,6 +203,9 @@ pub const JsRuntime = struct {
         const ctx = c.JS_NewContext(rt) orelse return;
         defer c.JS_FreeContext(ctx);
 
+        // Raise GC threshold to reduce collection pauses during rendering
+        c.JS_SetGCThreshold(rt, 16 * 1024 * 1024); // 16MB before GC
+
         // Store self pointer for callbacks
         c.JS_SetContextOpaque(ctx, @ptrCast(self));
 

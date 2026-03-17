@@ -67,7 +67,7 @@ pub const DrawCmd = struct {
 // Command ring buffer — producer/consumer, grows if needed
 // ---------------------------------------------------------------
 
-const INITIAL_RING_SIZE: usize = 256;
+const INITIAL_RING_SIZE: usize = 2048;
 
 pub const CmdRing = struct {
     buf: []DrawCmd,
