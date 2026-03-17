@@ -440,6 +440,8 @@ pub const JsRuntime = struct {
         _ = c.JS_SetPropertyStr(ctx, gfx_obj, "cube", c.JS_NewCFunction(ctx, jsGfxCube, "cube", 7));
         _ = c.JS_SetPropertyStr(ctx, gfx_obj, "line3d", c.JS_NewCFunction(ctx, jsGfxLine3d, "line3d", 7));
         _ = c.JS_SetPropertyStr(ctx, gfx_obj, "camera", c.JS_NewCFunction(ctx, jsGfxCamera, "camera", 4));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "triangle3d", c.JS_NewCFunction(ctx, jsGfxTriangle3d, "triangle3d", 10));
+        _ = c.JS_SetPropertyStr(ctx, gfx_obj, "solidCube", c.JS_NewCFunction(ctx, jsGfxSolidCube, "solidCube", 10));
         _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rgb", c.JS_NewCFunction(ctx, jsGfxRgb, "rgb", 3));
         _ = c.JS_SetPropertyStr(ctx, gfx_obj, "rgba", c.JS_NewCFunction(ctx, jsGfxRgba, "rgba", 4));
         _ = c.JS_SetPropertyStr(ctx, global, "gfx", gfx_obj);
@@ -1262,6 +1264,36 @@ pub const JsRuntime = struct {
         cmd.f[0] = if (argc >= 2) getF(ctx, argv, 1) else 5.0;
         cmd.f[1] = if (argc >= 3) getF(ctx, argv, 2) else 0.3;
         cmd.f[2] = if (argc >= 4) getF(ctx, argv, 3) else 0.0;
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    /// gfx.triangle3d(x1,y1,z1, x2,y2,z2, x3,y3,z3, color)
+    fn jsGfxTriangle3d(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 10) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .triangle3d, .color = colorFromArgs(ctx, argv, 9) };
+        for (0..9) |i| {
+            cmd.f[i] = getF(ctx, argv, i);
+        }
+        self.pushGfx(cmd);
+        return c.qjs_undefined();
+    }
+
+    /// gfx.solidCube(x,y,z, size, color, rx, ry, lightX, lightY, lightZ)
+    fn jsGfxSolidCube(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
+        if (argc < 5) return c.qjs_undefined();
+        const self = getSelf(ctx);
+        var cmd = display_mod.DrawCmd{ .tag = .cube3d_solid, .color = colorFromArgs(ctx, argv, 4) };
+        cmd.f[0] = getF(ctx, argv, 0); // x
+        cmd.f[1] = getF(ctx, argv, 1); // y
+        cmd.f[2] = getF(ctx, argv, 2); // z
+        cmd.f[3] = getF(ctx, argv, 3); // size
+        cmd.f[4] = if (argc >= 6) getF(ctx, argv, 5) else 0; // rx
+        cmd.f[5] = if (argc >= 7) getF(ctx, argv, 6) else 0; // ry
+        cmd.f[6] = if (argc >= 8) getF(ctx, argv, 7) else 1; // lightX
+        cmd.f[7] = if (argc >= 9) getF(ctx, argv, 8) else -1; // lightY
+        cmd.f[8] = if (argc >= 10) getF(ctx, argv, 9) else 0.5; // lightZ
         self.pushGfx(cmd);
         return c.qjs_undefined();
     }

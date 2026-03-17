@@ -101,7 +101,14 @@ Scene.prototype._draw = function(obj) {
 
     switch (obj.type) {
         case "cube":
-            gfx.cube(obj.x, obj.y, obj.z, obj.size || 1, c, obj.rx || 0, obj.ry || 0);
+            if (obj.solid) {
+                gfx.solidCube(obj.x, obj.y, obj.z, obj.size || 1, c, obj.rx || 0, obj.ry || 0,
+                    obj.lightX !== undefined ? obj.lightX : 1,
+                    obj.lightY !== undefined ? obj.lightY : -1,
+                    obj.lightZ !== undefined ? obj.lightZ : 0.5);
+            } else {
+                gfx.cube(obj.x, obj.y, obj.z, obj.size || 1, c, obj.rx || 0, obj.ry || 0);
+            }
             break;
         case "line":
             gfx.line(obj.x, obj.y, obj.x2 || 0, obj.y2 || 0, c, obj.thick || 1);

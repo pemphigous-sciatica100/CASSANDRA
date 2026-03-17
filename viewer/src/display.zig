@@ -45,9 +45,11 @@ pub const CmdTag = enum(u8) {
     text,
     pixel,
 
-    // 3D wireframe
+    // 3D primitives
     line3d,
     cube3d,
+    triangle3d,
+    cube3d_solid,
 };
 
 pub const DrawCmd = struct {
@@ -293,6 +295,24 @@ pub const DisplayManager = struct {
                     if (!d.in_frame) continue;
                     drawWireCube(d, cmd.f[0], cmd.f[1], cmd.f[2], cmd.f[3], cmd.f[4], cmd.f[5], toRlColor(cmd.color));
                 },
+                .triangle3d => {
+                    if (!d.in_frame) continue;
+                    const p1 = project3D(d, cmd.f[0], cmd.f[1], cmd.f[2]);
+                    const p2 = project3D(d, cmd.f[3], cmd.f[4], cmd.f[5]);
+                    const p3 = project3D(d, cmd.f[6], cmd.f[7], cmd.f[8]);
+                    rl.c.DrawTriangle(
+                        .{ .x = p1[0], .y = p1[1] },
+                        .{ .x = p2[0], .y = p2[1] },
+                        .{ .x = p3[0], .y = p3[1] },
+                        toRlColor(cmd.color),
+                    );
+                },
+                .cube3d_solid => {
+                    if (!d.in_frame) continue;
+                    // f[0..2] = center, f[3] = size, f[4] = rx, f[5] = ry
+                    // f[6] = light_x, f[7] = light_y, f[8] = light_z (light direction)
+                    drawSolidCube(d, cmd.f[0], cmd.f[1], cmd.f[2], cmd.f[3], cmd.f[4], cmd.f[5], cmd.f[6], cmd.f[7], cmd.f[8], cmd.color);
+                },
             }
         }
     }
@@ -400,5 +420,110 @@ fn drawWireCube(d: *const Display, cx: f32, cy: f32, cz: f32, size: f32, rx: f32
         const a = projected[e[0]];
         const b = projected[e[1]];
         rl.c.DrawLineEx(.{ .x = a[0], .y = a[1] }, .{ .x = b[0], .y = b[1] }, 1.5, color);
+    }
+}
+
+fn drawSolidCube(d: *const Display, cx: f32, cy: f32, cz: f32, size: f32, rx: f32, ry: f32, lx: f32, ly: f32, lz: f32, base_color: Color4) void {
+    const s = size * 0.5;
+    const verts = [8][3]f32{
+        .{ -s, -s, -s }, .{ s, -s, -s }, .{ s, s, -s }, .{ -s, s, -s },
+        .{ -s, -s, s },  .{ s, -s, s },  .{ s, s, s },  .{ -s, s, s },
+    };
+
+    // Rotate vertices
+    const crx = @cos(rx);
+    const srx = @sin(rx);
+    const cry = @cos(ry);
+    const sry = @sin(ry);
+
+    var rotated: [8][3]f32 = undefined;
+    var projected: [8][2]f32 = undefined;
+
+    for (0..8) |i| {
+        const vx = verts[i][0];
+        const vy = verts[i][1];
+        const vz = verts[i][2];
+        const x2 = vx * cry - vz * sry;
+        const z2 = vx * sry + vz * cry;
+        const y2 = vy * crx - z2 * srx;
+        const z3 = vy * srx + z2 * crx;
+        rotated[i] = .{ x2, y2, z3 };
+        projected[i] = project3D(d, cx + x2, cy + y2, cz + z3);
+    }
+
+    // 6 faces: each is 2 triangles, with a face normal for lighting
+    // Face definition: [v0, v1, v2, v3] — two triangles: (0,1,2) and (0,2,3)
+    const faces = [6][4]u8{
+        .{ 0, 1, 2, 3 }, // front (-Z)
+        .{ 5, 4, 7, 6 }, // back (+Z)
+        .{ 4, 0, 3, 7 }, // left (-X)
+        .{ 1, 5, 6, 2 }, // right (+X)
+        .{ 3, 2, 6, 7 }, // top (+Y)
+        .{ 4, 5, 1, 0 }, // bottom (-Y)
+    };
+
+    // Normalize light direction
+    const ll = @sqrt(lx * lx + ly * ly + lz * lz);
+    const nlx = if (ll > 0.001) lx / ll else 0;
+    const nly = if (ll > 0.001) ly / ll else -1;
+    const nlz = if (ll > 0.001) lz / ll else 0;
+
+    // Sort faces by average Z depth (painter's algorithm)
+    var face_order: [6]u8 = .{ 0, 1, 2, 3, 4, 5 };
+    var face_depths: [6]f32 = undefined;
+    for (0..6) |fi| {
+        const f = faces[fi];
+        face_depths[fi] = (rotated[f[0]][2] + rotated[f[1]][2] + rotated[f[2]][2] + rotated[f[3]][2]) * 0.25;
+    }
+    // Simple bubble sort (6 elements)
+    for (0..5) |i| {
+        for (i + 1..6) |j| {
+            if (face_depths[face_order[i]] < face_depths[face_order[j]]) {
+                const tmp = face_order[i];
+                face_order[i] = face_order[j];
+                face_order[j] = tmp;
+            }
+        }
+    }
+
+    for (face_order) |fi| {
+        const f = faces[fi];
+
+        // Compute face normal via cross product
+        const ax = rotated[f[1]][0] - rotated[f[0]][0];
+        const ay = rotated[f[1]][1] - rotated[f[0]][1];
+        const az = rotated[f[1]][2] - rotated[f[0]][2];
+        const bx = rotated[f[2]][0] - rotated[f[0]][0];
+        const by = rotated[f[2]][1] - rotated[f[0]][1];
+        const bz = rotated[f[2]][2] - rotated[f[0]][2];
+        const nx = ay * bz - az * by;
+        const ny = az * bx - ax * bz;
+        const nz = ax * by - ay * bx;
+        const nl = @sqrt(nx * nx + ny * ny + nz * nz);
+        if (nl < 0.001) continue;
+
+        // Backface culling: skip faces pointing away from camera
+        // Camera is at (0, 0, cam_dist), face center relative
+        const fcz = (rotated[f[0]][2] + rotated[f[1]][2] + rotated[f[2]][2] + rotated[f[3]][2]) * 0.25;
+        const view_dot = (nz / nl) * (d.cam_dist + fcz);
+        if (view_dot > 0) continue; // facing away
+
+        // Lighting: dot(normal, light_dir)
+        const dot = (nx / nl) * nlx + (ny / nl) * nly + (nz / nl) * nlz;
+        const brightness = @max(0.15, @min(1.0, dot * 0.5 + 0.5)); // ambient + diffuse
+
+        const r: u8 = @intFromFloat(@as(f32, @floatFromInt(base_color.r)) * brightness);
+        const g: u8 = @intFromFloat(@as(f32, @floatFromInt(base_color.g)) * brightness);
+        const b: u8 = @intFromFloat(@as(f32, @floatFromInt(base_color.b)) * brightness);
+        const face_color = rl.c.Color{ .r = r, .g = g, .b = b, .a = base_color.a };
+
+        // Draw two triangles for the quad face
+        const p0 = projected[f[0]];
+        const p1 = projected[f[1]];
+        const p2 = projected[f[2]];
+        const p3 = projected[f[3]];
+
+        rl.c.DrawTriangle(.{ .x = p0[0], .y = p0[1] }, .{ .x = p1[0], .y = p1[1] }, .{ .x = p2[0], .y = p2[1] }, face_color);
+        rl.c.DrawTriangle(.{ .x = p0[0], .y = p0[1] }, .{ .x = p2[0], .y = p2[1] }, .{ .x = p3[0], .y = p3[1] }, face_color);
     }
 }
