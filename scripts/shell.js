@@ -93,19 +93,23 @@ while (true) {
         globalThis.__stdin = stdin;
         globalThis.__piped = piped;
 
-        try {
-            if (!isLast) {
-                stdin = exec(scriptPath, true) || "";
-                piped = true;
-            } else {
-                exec(scriptPath);
-            }
-        } catch (e) {
-            if (e && e.message === "interrupted") {
-                // Ctrl+C — silently stop
+        if (!isLast) {
+            stdin = exec(scriptPath, true) || "";
+            piped = true;
+        } else {
+            const result = exec(scriptPath);
+            if (result && typeof result === "object" && !result.ok) {
+                if (result.reason === "interrupted") {
+                    // Ctrl+C — silent
+                } else {
+                    // Real error — print it
+                    term.color("red");
+                    if (result.error) print(result.error);
+                    if (result.stack) print(result.stack);
+                    term.reset();
+                }
                 break;
             }
-            throw e;
         }
     }
 }

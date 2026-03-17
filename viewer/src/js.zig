@@ -942,9 +942,38 @@ pub const JsRuntime = struct {
 
         if (c.qjs_is_exception(val) != 0) {
             if (capture) self.capturing = false;
-            printException(real_ctx, self);
+
+            // Build result object: {ok: false, reason: "interrupted"|"error", error: "...", stack: "..."}
+            const ex = c.JS_GetException(real_ctx);
+            defer c.JS_FreeValue(real_ctx, ex);
+
+            const is_interrupt = self.c_interrupt_flag != 0;
+
+            const result_obj = c.JS_NewObject(real_ctx);
+            _ = c.JS_SetPropertyStr(real_ctx, result_obj, "ok", c.qjs_false());
+            _ = c.JS_SetPropertyStr(real_ctx, result_obj, "reason",
+                c.JS_NewString(real_ctx, if (is_interrupt) "interrupted" else "error"));
+
+            // Attach error message
+            const err_str = c.JS_ToCString(real_ctx, ex);
+            if (err_str != null) {
+                _ = c.JS_SetPropertyStr(real_ctx, result_obj, "error",
+                    c.JS_NewString(real_ctx, err_str));
+                c.JS_FreeCString(real_ctx, err_str);
+            }
+
+            // Attach stack trace
+            if (c.qjs_is_object(ex) != 0) {
+                const stack = c.JS_GetPropertyStr(real_ctx, ex, "stack");
+                if (c.qjs_is_undefined(stack) == 0) {
+                    _ = c.JS_SetPropertyStr(real_ctx, result_obj, "stack", stack);
+                } else {
+                    c.JS_FreeValue(real_ctx, stack);
+                }
+            }
+
             if (capture) return c.qjs_null();
-            return c.qjs_false();
+            return result_obj;
         }
 
         // Return captured output
