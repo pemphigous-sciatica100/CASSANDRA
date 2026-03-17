@@ -484,6 +484,12 @@ pub const JsRuntime = struct {
                     std.time.sleep(chunk * @as(u64, std.time.ns_per_ms));
                     remaining -= chunk;
                 }
+                // If interrupted during sleep, kill all displays immediately
+                if (self.c_interrupt_flag != 0) {
+                    for (&self.display_mgr.displays) |*d| {
+                        d.active = false;
+                    }
+                }
             }
         }
         return c.qjs_undefined();
@@ -1084,6 +1090,8 @@ pub const JsRuntime = struct {
 
     fn jsGfxBegin(ctx: ?*c.JSContext, _: c.JSValue, argc: c_int, argv: [*c]c.JSValue) callconv(.c) c.JSValue {
         const self = getSelf(ctx);
+        // Don't start new frames if interrupted
+        if (self.c_interrupt_flag != 0) return c.qjs_undefined();
         var cmd = display_mod.DrawCmd{ .tag = .begin_frame };
         cmd.display_id = if (argc >= 1) @intCast(@as(u32, @bitCast(getI(ctx, argv, 0))) & 3) else 0;
         self.pushGfx(cmd);
