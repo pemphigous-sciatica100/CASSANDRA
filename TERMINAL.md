@@ -189,18 +189,46 @@ Keyboard ──> Terminal (Zig)
 
 ## Graphics API
 
-JavaScript programs can draw 2D and 3D graphics directly to the screen:
+JavaScript programs can draw 2D and 3D graphics directly to the screen. Commands flow through a ring buffer from the JS worker thread to the GPU — like a DMA controller.
+
+### 2D Drawing
 
 ```javascript
-gfx.create(0, 300, 300);
-gfx.move(0, 100, 50);
+gfx.create(0, 400, 400);     // create display 0, 400x400
+gfx.move(0, 50, 50);         // position on screen
 let t = 0;
 while (true) {
     gfx.begin(0);
-    gfx.clear(10, 10, 20);
-    gfx.camera(0, 5.0, 0.4, t * 0.02);
-    gfx.cube(0, 0, 0, 1.5, gfx.rgb(0, 255, 100), t * 0.03, t * 0.02);
-    gfx.text(8, 8, "CASSANDRA OS", 20, gfx.rgb(0, 200, 255));
+    gfx.clear(10, 10, 20);   // dark background
+    gfx.rect(50, 50, 100, 80, gfx.rgb(255, 0, 0));
+    gfx.circle(200, 200, 40, gfx.rgb(0, 255, 100));
+    gfx.triangle(300, 100, 350, 200, 250, 200, gfx.rgb(0, 100, 255));
+    gfx.text(10, 10, "Hello", 20, gfx.rgb(255, 255, 255));
+    gfx.end(0);
+    sleep(16);
+}
+```
+
+### 3D Rendering (GPU)
+
+3D uses Raylib's real GPU pipeline — proper depth buffer, backface culling, perspective projection:
+
+```javascript
+gfx.create(0, 400, 400);
+let t = 0;
+while (true) {
+    gfx.begin(0);
+    gfx.clear(15, 15, 25);
+    gfx.text(10, 10, "Solid Cube", 16, gfx.rgb(200, 200, 200));
+
+    // 3D mode: orbiting camera
+    const camX = Math.cos(t * 0.02) * 5;
+    const camZ = Math.sin(t * 0.02) * 5;
+    gfx.begin3d(camX, 3, camZ, 0, 0, 0, 45);
+    gfx.solidCube(0, 0, 0, 2, gfx.rgb(50, 200, 100));
+    gfx.cube(0, 0, 0, 2.02, gfx.rgb(100, 255, 150));  // wireframe outline
+    gfx.end3d();
+
     gfx.end(0);
     t++;
     sleep(16);
@@ -209,9 +237,85 @@ while (true) {
 
 ![Spinning 3D cube in 15 lines of JavaScript](screenshot_cube.png)
 
+### Scene Graph with Behaviors
+
+The `scene.js` library provides retained-mode objects with composable behaviors:
+
+```javascript
+exec("../scripts/lib/scene.js");
+const scene = new Scene(0, 400, 400);
+scene.position(50, 30);
+
+scene.cube({ solid: true, size: 1.5, color: gfx.rgb(50, 200, 100) })
+    .behave("color-cycle");
+
+scene.circle({ x: 200, y: 350, r: 20, color: gfx.rgb(255, 100, 50) })
+    .behave("bounce");
+
+scene.run();
+```
+
+Behaviors are `.js` files in `scripts/behaviors/`:
+
+```javascript
+// behaviors/bounce.js
+function(obj, t, dt, opts) {
+    obj.y = (obj.data._baseY || obj.y) + Math.sin(t * 3) * 0.5;
+    if (!obj.data._baseY) obj.data._baseY = obj.y;
+}
+```
+
+Built-in behaviors: `rotate`, `bounce`, `pulse`, `orbit`, `color-cycle`.
+
 ![Solar system simulation with behaviors](screenshot_solarsystem.png)
 
-Commands flow through a lock-free ring buffer from the JS worker thread to the GPU — like a DMA controller. No frame buffering, no megabytes of memory. The ring grows only when needed.
+### Tutorials
+
+7 progressive tutorials in `scripts/tutorial/`:
+
+| Tutorial | Description |
+|----------|-------------|
+| `01-triangle` | Hello triangle |
+| `02-colors` | Colored shapes (triangles, rects, circles) |
+| `03-animation` | Inline behaviors (bouncing, spinning) |
+| `04-composition` | Solar system with orbiting planets and moon |
+| `05-3d-cubes` | 3D wireframe cube grid with camera orbit |
+| `06-starfield` | Classic demoscene starfield effect |
+| `07-particles` | Fire particle system with gravity and fade |
+| `08-solid-cube` | GPU-rendered solid cube with depth buffer |
+| `09-lit-scene` | Multiple solid cubes with behaviors |
+
+### Graphics API Reference
+
+**Display lifecycle:**
+- `gfx.create(id, w, h)` — create display (0-3)
+- `gfx.destroy(id)` — free display
+- `gfx.move(id, x, y)` — position on screen
+
+**Frame:**
+- `gfx.begin(id)` / `gfx.end(id)` — frame boundaries
+- `gfx.clear(r, g, b)` — clear with color (omit for transparent)
+
+**2D primitives:**
+- `gfx.line(x1, y1, x2, y2, color, thick?)`
+- `gfx.rect(x, y, w, h, color)`
+- `gfx.rectLines(x, y, w, h, color, thick?)`
+- `gfx.circle(cx, cy, r, color)`
+- `gfx.triangle(x1, y1, x2, y2, x3, y3, color)`
+- `gfx.text(x, y, str, size?, color?)`
+- `gfx.pixel(x, y, color)`
+
+**3D mode (GPU):**
+- `gfx.begin3d(camX, camY, camZ, targetX, targetY, targetZ, fovy?)`
+- `gfx.end3d()`
+- `gfx.solidCube(x, y, z, size, color)`
+- `gfx.cube(x, y, z, size, color)` — wireframe
+- `gfx.triangle3d(x1,y1,z1, x2,y2,z2, x3,y3,z3, color)`
+- `gfx.line3d(x1,y1,z1, x2,y2,z2, color)`
+
+**Color helpers:**
+- `gfx.rgb(r, g, b)` — returns packed color
+- `gfx.rgba(r, g, b, a)` — with alpha
 
 ## Engine
 
