@@ -340,6 +340,18 @@ pub const DisplayManager = struct {
                 },
             }
         }
+
+        // Safety: force-close any open texture/3D modes that didn't get an end command this frame
+        for (&self.displays) |*d| {
+            if (d.in_3d) {
+                rl.c.EndMode3D();
+                d.in_3d = false;
+            }
+            if (d.in_frame) {
+                rl.c.EndTextureMode();
+                d.in_frame = false;
+            }
+        }
     }
 
     /// Blit all active displays to screen, clean up inactive ones
