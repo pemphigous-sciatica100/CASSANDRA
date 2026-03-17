@@ -284,6 +284,13 @@ Built-in behaviors: `rotate`, `bounce`, `pulse`, `orbit`, `color-cycle`.
 | `07-particles` | Fire particle system with gravity and fade |
 | `08-solid-cube` | GPU-rendered solid cube with depth buffer |
 | `09-lit-scene` | Multiple solid cubes with behaviors |
+| `10-mesh-sphere` | Icosphere from point cloud (320 triangles) |
+| `11-mesh-gallery` | Sphere, box, and animated wave plane |
+| `12-fullscreen-meshes` | Full viewport transparent meshes over the map |
+
+![Lit scene — solid cubes with orbiting camera](screenshot_litscene.png)
+
+![Full viewport meshes floating over the world map](screenshot_meshes.png)
 
 ### Graphics API Reference
 
@@ -316,6 +323,23 @@ Built-in behaviors: `rotate`, `bounce`, `pulse`, `orbit`, `color-cycle`.
 **Color helpers:**
 - `gfx.rgb(r, g, b)` — returns packed color
 - `gfx.rgba(r, g, b, a)` — with alpha
+
+### Mesh Library
+
+The `mesh.js` library generates 3D meshes with per-face lighting:
+
+```javascript
+exec("../scripts/lib/mesh.js");
+
+const sphere = Mesh.icosphere(1.0, 2);  // radius, subdivisions (320 tris)
+const box = Mesh.box(1, 1, 1);          // width, height, depth (12 tris)
+const plane = Mesh.plane(4, 4, 8, 8);   // width, depth, segsW, segsD
+
+// Draw inside begin3d/end3d
+sphere.draw(x, y, z, color, [lightX, lightY, lightZ]);
+```
+
+Meshes compute per-vertex normals automatically and render with diffuse shading.
 
 ## Engine
 

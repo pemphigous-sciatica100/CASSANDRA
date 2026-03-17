@@ -253,6 +253,10 @@ python make_movie.py      # stitches into concept_timelapse.mp4
 
 CASSANDRA includes a built-in JavaScript-powered terminal. Press **backtick** to open it. Run commands, write scripts, pipe data between programs, or launch host binaries like `htop`, `vi`, and `ssh` — all inside the viewer.
 
+Write 3D graphics programs in JavaScript — icospheres, solid cubes, particle systems, all rendered by the GPU at 60fps with composable behaviors.
+
+![3D meshes floating over the world map](screenshot_meshes.png)
+
 See [TERMINAL.md](TERMINAL.md) for the full documentation.
 
 ## Like what you see?
